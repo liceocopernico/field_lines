@@ -7,15 +7,11 @@ box_x=1.0
 box_y=1.0
 k=1
 
-
-
 def to_screen(x,y,screen_size,box_size):
     return (screen_size[0]/2+x/box_size[0]*screen_size[0],screen_size[1]/2-y/box_size[1]*screen_size[1])
 
-
 def to_box(x,y,screen_size,box_size):
     return(x*box_size[0]/screen_size[0]-box_size[0]/2,box_size[1]/2-y*box_size[1]/screen_size[1])
-
 
 class Field:
     def __init__(self,charges):
@@ -25,14 +21,13 @@ class Field:
         self.probes=[]
         self.field_lines=[]
         self.scale=0.2
-        
+    
 
     def _draw_arrow_head(self,size,angle,color):
         
         surface=pygame.Surface((size,size),pygame.SRCALPHA, 32 )    
         pygame.gfxdraw.filled_polygon( surface, ((size,0.5*size),(0,0),(0,size) ),color)
         surface=pygame.transform.rotate(surface,angle)
-        
         return surface
   
     
@@ -40,7 +35,6 @@ class Field:
         x_versor=pygame.Vector2(1,0)
         m_f=10
         field=self.compute_field(x,y)
-
         start=to_screen(x,y,self.screen_size,(box_x,box_y))
         end=to_screen(x+0.5*field.x/m_f*box_x*self.scale,   y+field.y/m_f*box_y*self.scale,self.screen_size,(box_x,box_y))
         screen_field=pygame.Vector2(end[0]-start[0],end[1]-start[1])
@@ -59,8 +53,6 @@ class Field:
             self.draw(probe[0],probe[1])
         
     def draw_field_lines(self):
-        
-        
         for field_line in self.field_lines:
             i=0
             samples=len(field_line.y[0])
