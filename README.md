@@ -1,3 +1,10 @@
+# Installation
+
+* Install UV https://docs.astral.sh/uv/getting-started/installation/
+* Inside field_lines folder execute uv sync
+* Run program with uv run field_lines.py
+
+
 # Keyboard shortcuts
 
 * __c__ create positive charge at mouse position
