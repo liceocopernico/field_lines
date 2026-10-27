@@ -202,4 +202,6 @@ class SceneView:
             self.pl.enable_trackball_style()
             self.pl.view_isometric()
             self.pl.reset_camera(bounds=(-VIEW_HALF, VIEW_HALF) * 3)
+        # mark the camera as placed: otherwise PyVista resets it the next time plotter.camera is read
+        self.pl.renderer.camera.is_set = True
         self.pl.render()

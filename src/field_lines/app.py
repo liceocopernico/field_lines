@@ -25,6 +25,7 @@ from field_lines.view import SceneView
 FRAME_MS = 33  # growth animation: about 30 frames per second
 FIELDS_DELAY_MS = 120  # equipotentials, arrows and plane are recomputed this long after the last change
 SOLVE_DELAY_MS = 300  # the conductor model is solved this long after the capacitor's last change
+KEPT_SOLUTIONS = 4  # solved geometries kept for going back to them (up to ~20 MB each)
 WHEEL_STEP = 0.25 * NC  # charge change per wheel notch
 NEW_CHARGE = 2 * NC
 
@@ -353,6 +354,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _clicked(self, display) -> None:
+        if self._charge_at(display) is not None:
+            return  # a click on a charge (that grabbed it) is not a click on the space behind it
         point = self._point_under_mouse(display)
         if point is None or np.any(np.abs(point) > VIEW_HALF):
             return
@@ -431,6 +434,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.closed or grid is None:
             return
         self._solutions[key] = grid
+        while len(self._solutions) > KEPT_SOLUTIONS:
+            del self._solutions[next(iter(self._solutions))]  # the oldest
         if self.scene.uses_conductor and geometry_key(self.scene.capacitor) == key:
             self._update_conductor()
             self.refresh(animate=True)

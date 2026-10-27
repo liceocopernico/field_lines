@@ -131,7 +131,9 @@ uv run pytest
 
 **Render tests** draw off-screen with PyVista. **GUI tests** drive the real
 window on Qt's offscreen platform, without drawing (VTK has no OpenGL context
-there).
+there). Some of them send real Qt mouse, wheel and key events to the 3D
+view: a click versus a drag, the wheel on a charge versus on empty space,
+dragging a charge, and the keys.
 
 ## Layout
 

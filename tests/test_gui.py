@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from PySide6 import QtCore
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from field_lines.interaction import to_display
 from field_lines.strings import tr
@@ -180,3 +180,98 @@ def test_too_small_a_gap_is_clamped_in_the_conductor_model(window):
     assert window.scene.capacitor.separation >= 0.0076
     assert window.panel.separation_box.value() == pytest.approx(window.scene.capacitor.separation * 100)
     assert "0.8 cm" in window.panel.capacitor_status.text().replace(",", ".")
+
+
+# --- real Qt events, through VTK's event dispatch -------------------------
+
+
+def qt_point(window, world):
+    """Where to put the Qt mouse for a world point (Qt counts y from the top, VTK from the bottom)."""
+    x, y = to_display(window.plotter, np.asarray(world, dtype=float))
+    return QtCore.QPoint(round(x), round(window.plotter.height() - 1 - y))
+
+
+def in_2d(window):
+    window.panel.radio_2d.setChecked(True)
+    window._retrace()
+
+
+def test_keys_add_a_charge_and_vtk_keys_are_disabled(window, qtbot):
+    in_2d(window)
+    qtbot.mouseMove(window.plotter, qt_point(window, [0.0, 0.05, 0.0]))
+    qtbot.keyClick(window.plotter, "c")
+    assert len(window.scene.charges) == 3
+    np.testing.assert_allclose(window.scene.charges[-1].position, [0.0, 0.05, 0.0], atol=5e-4)
+    assert window.scene.charges[-1].q > 0
+    window.load_preset("capacitor")
+    plate = window.view.plate_actors[0]
+    qtbot.keyClick(window.plotter, "w")  # VTK would turn every actor into wireframe
+    assert plate.prop.style == "Surface"
+
+
+def test_flip_key_on_a_charge(window, qtbot):
+    in_2d(window)
+    qtbot.mouseMove(window.plotter, qt_point(window, window.scene.charges[0].position))
+    qtbot.keyClick(window.plotter, "t")
+    assert window.scene.charges[0].q < 0
+
+
+def test_a_click_seeds_a_line_but_a_drag_does_not(window, qtbot):
+    in_2d(window)
+    start = qt_point(window, [0.0, 0.04, 0.0])
+    qtbot.mouseClick(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    qtbot.waitUntil(lambda: len(window.scene.click_seeds) == 1)
+    np.testing.assert_allclose(window.scene.click_seeds[0], [0.0, 0.04, 0.0], atol=5e-4)
+    qtbot.mousePress(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(window.plotter, start + QtCore.QPoint(20, 0))
+    qtbot.mouseRelease(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=start + QtCore.QPoint(20, 0))
+    qtbot.wait(50)
+    assert len(window.scene.click_seeds) == 1
+
+
+def wheel(window, qtbot, pos, steps=1):
+    qtbot.mouseMove(window.plotter, pos)
+    event = QtGui.QWheelEvent(
+        QtCore.QPointF(pos),
+        QtCore.QPointF(window.plotter.mapToGlobal(pos)),
+        QtCore.QPoint(0, 0),
+        QtCore.QPoint(0, 120 * steps),
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+        QtCore.Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QtWidgets.QApplication.sendEvent(window.plotter, event)
+
+
+def test_wheel_on_a_charge_changes_it_and_does_not_zoom(window, qtbot):
+    in_2d(window)
+    scale = window.plotter.camera.parallel_scale
+    wheel(window, qtbot, qt_point(window, window.scene.charges[0].position))
+    assert window.scene.charges[0].q == 2.25 * NC
+    assert window.plotter.camera.parallel_scale == scale
+    wheel(window, qtbot, qt_point(window, [0.0, 0.07, 0.0]))
+    assert window.scene.charges[0].q == 2.25 * NC
+    assert window.plotter.camera.parallel_scale != scale  # on empty space the wheel zooms
+
+
+def test_dragging_a_charge_with_the_mouse(window, qtbot):
+    in_2d(window)
+    start = qt_point(window, window.scene.charges[0].position)
+    end = qt_point(window, [-0.03, 0.03, 0.0])
+    qtbot.mousePress(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(window.plotter, (start + end) / 2)
+    qtbot.mouseMove(window.plotter, end)
+    qtbot.mouseRelease(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=end)
+    qtbot.wait(50)
+    np.testing.assert_allclose(window.scene.charges[0].position, [-0.03, 0.03, 0.0], atol=1e-3)
+    assert window.panel.table.cellWidget(0, 2).value() == pytest.approx(3.0, abs=0.1)
+    assert window.scene.click_seeds == []  # pressing on a charge is not a click on the space behind it
+
+
+def test_reading_the_camera_does_not_move_it(window):
+    for planar in (False, True):
+        window.panel.radio_2d.setChecked(planar)
+        before = window.plotter.renderer.GetActiveCamera().GetPosition()
+        window.plotter.camera.up  # PyVista resets a camera it thinks was never placed
+        assert window.plotter.renderer.GetActiveCamera().GetPosition() == before

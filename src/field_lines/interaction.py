@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 
 import numpy as np
 import pyvista as pv
+from PySide6 import QtCore
 from vtkmodules.vtkInteractionWidgets import vtkSphereWidget
 from vtkmodules.vtkRenderingCore import vtkCellPicker
 
@@ -114,25 +115,26 @@ def charge_under_mouse(plotter: pv.Plotter, charges: Sequence[PointCharge], disp
     return best
 
 
-class MouseEvents:
+class MouseEvents(QtCore.QObject):
     """Clicks (press and release without dragging), mouse moves and wheel turns on the view.
 
-    Events that a charge's sphere widget takes never get here, so clicking on
-    a charge does not count as a click on the empty space behind it.
+    Clicks are watched on the Qt widget, before VTK: the camera styles grab
+    VTK's event focus on a button press, and the release then never reaches
+    other VTK observers. Positions passed on are VTK display coordinates.
     """
 
     def __init__(
         self,
-        plotter: pv.Plotter,
+        plotter,
         on_click: Callable[[tuple[int, int]], None],
         on_move: Callable[[tuple[int, int]], None],
         on_wheel: Callable[[tuple[int, int], int], bool],
     ):
+        super().__init__(plotter)
         self.iren = plotter.iren.interactor
         self.on_click, self.on_move, self.on_wheel = on_click, on_move, on_wheel
         self.pressed_at = None
-        self.iren.AddObserver("LeftButtonPressEvent", self._press)
-        self.iren.AddObserver("LeftButtonReleaseEvent", self._release)
+        plotter.installEventFilter(self)
         self.iren.AddObserver("MouseMoveEvent", self._move)
         # above the camera style, so that a wheel turn on a charge does not also zoom
         self._wheel_tags = {
@@ -142,16 +144,22 @@ class MouseEvents:
         # VTK's own one-letter keys (w: wireframe, e/q: exit, 3: stereo...) are not wanted here
         self._char_tag = self.iren.AddObserver("CharEvent", self._swallow, 10.0)
 
-    def _press(self, _obj, _event):
-        self.pressed_at = self.iren.GetEventPosition()
-
-    def _release(self, _obj, _event):
-        if self.pressed_at is None:
-            return
-        start, end = np.array(self.pressed_at), np.array(self.iren.GetEventPosition())
-        self.pressed_at = None
-        if np.abs(end - start).max() <= CLICK_TOLERANCE:
-            self.on_click(tuple(end))
+    def eventFilter(self, watched, event) -> bool:
+        left = QtCore.Qt.MouseButton.LeftButton
+        if event.type() == QtCore.QEvent.Type.Wheel:
+            # pyvistaqt passes wheel turns to VTK without their position: VTK would use the last mouse move
+            ratio = watched.devicePixelRatioF()
+            self.iren.SetEventPositionFlipY(round(event.position().x() * ratio), round(event.position().y() * ratio))
+        elif event.type() == QtCore.QEvent.Type.MouseButtonPress and event.button() == left:
+            self.pressed_at = event.position()
+        elif event.type() == QtCore.QEvent.Type.MouseButtonRelease and event.button() == left:
+            if self.pressed_at is not None:
+                moved = (event.position() - self.pressed_at).manhattanLength()
+                self.pressed_at = None
+                if moved <= CLICK_TOLERANCE:
+                    # once the widget has passed the release to VTK, whose position is then up to date
+                    QtCore.QTimer.singleShot(0, lambda: self.on_click(self.iren.GetEventPosition()))
+        return False
 
     def _move(self, _obj, _event):
         self.on_move(self.iren.GetEventPosition())

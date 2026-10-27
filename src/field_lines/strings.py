@@ -79,9 +79,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Drag: rotate · drag a charge: move it · click on the coloured plane: line through the point",
     },
     "readout": {"it": "V = {V}    |E| = {E}", "en": "V = {V}    |E| = {E}"},
-    "bar_E": {"it": "|E| [V/m]", "en": "|E| [V/m]"},
+    # VTK's font has no "|": E stands for the field's strength
+    "bar_E": {"it": "E [V/m]", "en": "E [V/m]"},
     "bar_V": {"it": "V [V]", "en": "V [V]"},
-    "bar_slice_E": {"it": "|E| sul piano [V/m]", "en": "|E| on the plane [V/m]"},
+    "bar_slice_E": {"it": "E sul piano [V/m]", "en": "E on the plane [V/m]"},
 }
 
 _language = "it"
