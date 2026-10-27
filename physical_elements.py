@@ -80,11 +80,15 @@ class Field:
                  r_vector_x=x-charge.r.x
                  r_vector_y=y-charge.r.y
                  dist=math.sqrt(r_vector_x**2+r_vector_y**2)
+                 if dist==0:
+                     return [0.0,0.0]
                  vers_r_x=r_vector_x/dist
                  vers_r_y=r_vector_y/dist
                  field[0]+=k*charge.q/dist**2*vers_r_x
                  field[1]+=k*charge.q/dist**2*vers_r_y
             field_m=math.sqrt(field[0]**2+field[1]**2)
+            if field_m==0:
+                return field
             field[0]=field[0]/field_m
             field[1]=field[1]/field_m
             
@@ -99,7 +103,26 @@ class Field:
         t_max=2
         t_span=(0,t_max)
         r_0=[x,y]
-        field_line=solve_ivp(self.compute_field2,t_span,r_0,t_eval=np.linspace(0,t_max,150),method='RK23')
+        r_stop=0.003
+        e_min=1e-3*k*sum(abs(charge.q) for charge in self.charges)
+
+        def hit_charge(t,r):
+            return min((math.sqrt((r[0]-charge.r.x)**2+(r[1]-charge.r.y)**2) for charge in self.charges if charge.q<0),default=math.inf)-r_stop
+        hit_charge.terminal=True
+        hit_charge.direction=-1
+
+        def null_field(t,r):
+            return self.compute_field(r[0],r[1]).length()-e_min
+        null_field.terminal=True
+        null_field.direction=-1
+
+        if hit_charge(0,r_0)<0:
+            return None
+
+        field_line=solve_ivp(self.compute_field2,t_span,r_0,t_eval=np.linspace(0,t_max,150),method='RK23',events=(hit_charge,null_field))
+        for y_event in field_line.y_events:
+            if len(y_event):
+                field_line.y=np.append(field_line.y,y_event.T,axis=1)
         self.field_lines.append(field_line)
         return field_line
     
@@ -110,6 +133,8 @@ class Field:
         for charge in self.charges:
             r_vector=f_pos-charge.r
             r=r_vector.length()
+            if r==0:
+                return pygame.Vector2(0,0)
             vers_r=r_vector/r
             field+=k*charge.q/r**2*vers_r
         return field
@@ -159,16 +184,16 @@ class charge_distribution:
                               self.E.refresh_field_lines()
 
             case pygame.MOUSEBUTTONDOWN:
-                if event.button==1:
+                if event.button==1 and self.charges:
                    for q in self.charges:
                         if q.get_collision(event.pos):
                             print("Too close to a charge")
                             self.anchor=q
                             break
-                        else: 
-                            probe_position=to_box(event.pos[0],event.pos[1],self.screen_size,(box_x,box_y))
-                            self.E.probes.append(probe_position)
-                            self.E.get_field_line(probe_position[0],probe_position[1])
+                   else:
+                        probe_position=to_box(event.pos[0],event.pos[1],self.screen_size,(box_x,box_y))
+                        self.E.probes.append(probe_position)
+                        self.E.get_field_line(probe_position[0],probe_position[1])
             
             case pygame.MOUSEMOTION:    
                 if self.anchor:
