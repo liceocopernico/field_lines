@@ -62,6 +62,57 @@ class SolverWorker(QtCore.QObject):
     finished = QtCore.Signal(object, object)
 
 
+class StatusLight(QtWidgets.QWidget):
+    """In the status bar: a coloured light and what the program is doing.
+
+    "ready" (green, steady), "busy" (amber, flashing while something is being
+    computed in the background) or "error" (red, steady).
+    """
+
+    COLOURS = {"ready": "#3a9d3a", "busy": "#f0a000", "error": "#d03030"}
+    FLASH_MS = 450
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(4, 0, 8, 0)
+        self.light = QtWidgets.QLabel()
+        self.light.setFixedSize(14, 14)
+        self.label = QtWidgets.QLabel()
+        layout.addWidget(self.light)
+        layout.addWidget(self.label)
+        self.state = ""
+        self._lit = True
+        self._flash = QtCore.QTimer(self, interval=self.FLASH_MS)
+        self._flash.timeout.connect(self._toggle)
+
+    def set_state(self, state: str, text: str) -> None:
+        self.label.setText(text)
+        if state == self.state:
+            return
+        self.state = state
+        self._lit = True
+        self._paint()
+        if state == "busy":
+            self._flash.start()
+        else:
+            self._flash.stop()
+
+    def text(self) -> str:
+        return self.label.text()
+
+    def flashing(self) -> bool:
+        return self._flash.isActive()
+
+    def _toggle(self) -> None:
+        self._lit = not self._lit
+        self._paint()
+
+    def _paint(self) -> None:
+        colour = self.COLOURS.get(self.state, "#999999") if self._lit else "#ececec"
+        self.light.setStyleSheet(f"background-color: {colour}; border: 1px solid #888; border-radius: 7px;")
+
+
 class PanelScroll(QtWidgets.QScrollArea):
     """Scrolls the panel up and down, and is always as wide as the panel needs."""
 
@@ -113,8 +164,12 @@ class MainWindow(QtWidgets.QMainWindow):
         dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         dock.setTitleBarWidget(QtWidgets.QWidget())
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.status_light = StatusLight()
         self.hint = QtWidgets.QLabel()
+        # the hint gives way when the bar is short, not the status next to it
+        self.hint.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.readout = QtWidgets.QLabel()
+        self.statusBar().addWidget(self.status_light)
         self.statusBar().addWidget(self.hint, 1)
         self.statusBar().addPermanentWidget(self.readout)
 
@@ -249,6 +304,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Recompute the sampled views a little later, in the worker thread."""
         self._fields_generation += 1
         self._fields_timer.start()
+        self._update_status()
 
     def _compute_fields(self) -> None:
         options = self.panel.view_options()
@@ -288,6 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.set_arrows(result.arrows)
         self.view.set_slice(result.slice, result.options.slice_quantity)
         self._shown_generation = result.generation
+        self._update_status()
         self.plotter.render()
 
     def replay(self) -> None:
@@ -555,9 +612,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if values is not None:
             units = dict(E_center="V/m", E_ideal="V/m", dV="V", Q="C", C="F", C_ideal="F")
             texts = {f"readout_{name}": format_quantity(values[name], unit) for name, unit in units.items()}
-        status = tr("spheres_touch") if self._touching else tr("computing") if self._computing() else ""
-        self.panel.set_readouts(texts, status)
+        self.panel.set_readouts(texts)
         self.panel.set_sphere_charges(self._sphere_charges())
+        self._update_status()
+
+    def _update_status(self) -> None:
+        """The light and text in the status bar: what the program is doing now."""
+        updating_views = self._fields_timer.isActive() or self._shown_generation != self._fields_generation
+        if self._touching:
+            self.status_light.set_state("error", tr("spheres_touch"))
+        elif self._computing():
+            self.status_light.set_state("busy", tr("computing"))
+        elif updating_views:
+            self.status_light.set_state("busy", tr("updating_views"))
+        else:
+            self.status_light.set_state("ready", tr("ready"))
 
     def _views_edited(self) -> None:
         options = self.panel.view_options()

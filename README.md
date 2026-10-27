@@ -80,8 +80,11 @@ In the view:
 | `T` | flip the sign of the charge under the mouse | same |
 | `R` | clear everything | same |
 
-The status bar shows V and |E| under the mouse: anywhere in 2D, on the
-coloured plane in 3D.
+The status bar shows, on the left, what the program is doing: a green light
+and "Pronto" (ready), a flashing amber light while the conductors are being
+solved or the equipotentials and the plane are recomputed in the
+background, or a red light if spheres touch. On the right it shows V and
+|E| under the mouse: anywhere in 2D, on the coloured plane in 3D.
 
 ## The physics
 
@@ -97,7 +100,10 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
   lines of 3D point charges, cut by the plane, as in the old app.
 - From a plate or a sphere, lines start in proportion to the flux leaving
   each part of its surface. That is why only a few leave a plate's outer
-  face, and why on conductors they crowd where the charge does.
+  face, and why on conductors they crowd where the charge does. The
+  surface is cut in two again and again, each part with flux in proportion
+  to the lines it gets, until each part has one line, which starts at the
+  part's centre of flux: the lines spread evenly, not in rows.
 - Lines start from the sign with the larger total charge: forward along E
   from + sources, or backwards from − sources when the negative charge is
   larger. A conductor may be positive in some parts and negative in others

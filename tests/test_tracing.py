@@ -131,3 +131,26 @@ def test_capacitor_cut_across_keeps_lines_in_the_plane():
     assert lines
     for line in lines:
         assert np.abs(line.points[:, 2]).max() < 1e-12
+
+
+def test_lines_start_evenly_spread_over_a_plate_face():
+    """In 3D a plate's seeds once lay in rows: equal steps of flux along a list of candidates."""
+    sigma, d = 2e-7, 0.03
+    plates = [Plate(sigma, [0, 0, d / 2], 0.1, 0.1), Plate(-sigma, [0, 0, -d / 2], 0.1, 0.1)]
+    seeds = seeding.plate_seeds(Superposition(plates), plates[0], 80, 0.001, 1, planar=False)
+    assert len(seeds) == 80
+    inner = seeds[seeds[:, 2] < d / 2]
+    gaps = np.linalg.norm(inner[:, None, :2] - inner[None, :, :2], axis=2)
+    np.fill_diagonal(gaps, np.inf)
+    nearest = gaps.min(axis=1)
+    assert nearest.std() / nearest.mean() < 0.25  # about the same gap everywhere...
+    assert nearest.min() > 0.5 * nearest.mean()  # ...no two lines starting side by side
+
+
+def test_shares_and_stratified_sampling():
+    assert seeding._shares([3.0, 1.0], 8) == [6, 2]
+    assert sum(seeding._shares([1.0, 1.0, 1.0], 10)) == 10
+    candidates = np.column_stack((np.linspace(0, 1, 101), np.zeros(101), np.zeros(101)))
+    weights = np.where(candidates[:, 0] < 0.5, 3.0, 1.0)  # three times denser on the left half
+    seeds = seeding._stratified(candidates, weights, 8)
+    assert (seeds[:, 0] < 0.5).sum() == 6

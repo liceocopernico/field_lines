@@ -17,6 +17,8 @@ STRINGS: dict[str, dict[str, str]] = {
     "kind_charges": {"it": "Cariche puntiformi e lamine cariche", "en": "Point charges and charged sheets"},
     "kind_conductors": {"it": "Conduttori a potenziale fissato (Laplace)", "en": "Conductors at fixed potentials (Laplace)"},
     "computing": {"it": "Calcolo in corso…", "en": "Computing…"},
+    "updating_views": {"it": "Aggiornamento della vista…", "en": "Updating the view…"},
+    "ready": {"it": "Pronto", "en": "Ready"},
     "spheres_touch": {
         "it": "Le sfere non possono toccarsi né toccare le armature: spostale.",
         "en": "Spheres may not touch each other or the plates: move them apart.",

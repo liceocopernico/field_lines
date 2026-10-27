@@ -129,10 +129,6 @@ class Panel(QtWidgets.QWidget):
         )
         layout.addWidget(self.radio_charges)
         layout.addWidget(self.radio_conductors)
-        self.model_status = QtWidgets.QLabel()
-        self.model_status.setWordWrap(True)
-        self.model_status.hide()
-        layout.addWidget(self.model_status)
         return group
 
     def _preset_group(self):
@@ -494,11 +490,9 @@ class Panel(QtWidgets.QWidget):
             normal=normal,
         )
 
-    def set_readouts(self, values: dict[str, str], status: str = "") -> None:
+    def set_readouts(self, values: dict[str, str]) -> None:
         for key, label in self.readouts.items():
             label.setText(values.get(key, "—"))
-        self.model_status.setText(status)
-        self.model_status.setVisible(bool(status))
 
     def view_options(self) -> ViewOptions:
         return ViewOptions(

@@ -71,8 +71,6 @@ def plate_seeds(model: FieldModel, plate: Plate, n: int, offset: float, sign: in
         else:
             v = np.array([fixed])
     uu, vv = np.meshgrid(u, v, indexing="ij")
-    uu[1::2] = uu[1::2, ::-1]  # serpentine order, so neighbouring candidates are neighbours in space
-    vv[1::2] = vv[1::2, ::-1]
     candidates, weights = [], []
     for face in (1, -1):
         local = np.column_stack((uu.ravel(), vv.ravel(), np.full(uu.size, face * offset)))
@@ -81,7 +79,9 @@ def plate_seeds(model: FieldModel, plate: Plate, n: int, offset: float, sign: in
         flux = sign * model.field(points) @ normal
         candidates.append(points)
         weights.append(np.maximum(flux, 0.0))
-    return _spread(np.concatenate(candidates), np.concatenate(weights), n)
+    shares = _shares([w.sum() for w in weights], n)  # each face its share of the lines
+    seeds = [_stratified(c, w, k) for c, w, k in zip(candidates, weights, shares)]
+    return np.concatenate(seeds)
 
 
 def sphere_seeds(model: FieldModel, center: np.ndarray, radius: float, n: int, offset: float, sign: int, planar: bool):
@@ -92,17 +92,53 @@ def sphere_seeds(model: FieldModel, center: np.ndarray, radius: float, n: int, o
     directions = circle(SPHERE_SAMPLES) if planar else fibonacci_sphere(SPHERE_SAMPLES)
     candidates = center + (radius + offset) * directions
     flux = sign * np.einsum("ij,ij->i", model.field(candidates), directions)
-    return _spread(candidates, np.maximum(flux, 0.0), n)
+    return _stratified(candidates, np.maximum(flux, 0.0), n)
 
 
-def _spread(candidates: np.ndarray, weights: np.ndarray, n: int) -> np.ndarray:
-    """n of the candidates, as many from each part as its share of the weight (systematic sampling)."""
-    total = weights.sum()
-    if n == 0 or total == 0:
-        return np.empty((0, 3))
-    targets = (np.arange(n) + 0.5) * total / n
-    chosen = np.searchsorted(np.cumsum(weights), targets)
-    return candidates[np.minimum(chosen, len(candidates) - 1)]
+def _shares(weights: Sequence[float], n: int) -> list[int]:
+    """n split into whole numbers in proportion to the weights (largest remainders)."""
+    total = sum(weights)
+    if n == 0 or total <= 0:
+        return [0] * len(weights)
+    exact = [n * w / total for w in weights]
+    shares = [int(e) for e in exact]
+    for i in sorted(range(len(weights)), key=lambda i: exact[i] - shares[i], reverse=True)[: n - sum(shares)]:
+        shares[i] += 1
+    return shares
+
+
+def _stratified(candidates: np.ndarray, weights: np.ndarray, n: int) -> np.ndarray:
+    """n of the candidates, evenly spread with density proportional to the weight.
+
+    The candidates are cut in two across their longest extent, so that each
+    part carries weight in proportion to the lines it gets, and each part is
+    cut again, until a part gets one line: it starts at the candidate nearest
+    the part's centre of weight. Unlike taking candidates at equal steps of
+    weight along a list, this spreads the lines over a surface, not in rows.
+    """
+    keep = weights > 0
+    points, w = candidates[keep], weights[keep]
+    seeds: list[np.ndarray] = []
+
+    def split(index: np.ndarray, k: int) -> None:
+        if k == 0 or len(index) == 0:
+            return
+        part = points[index]
+        if k == 1 or len(index) == 1:
+            centre = (part * w[index, None]).sum(axis=0) / w[index].sum()
+            nearest = part[np.argmin(np.linalg.norm(part - centre, axis=1))]
+            seeds.extend([nearest] * k)
+            return
+        axis = int(np.argmax(part.max(axis=0) - part.min(axis=0)))
+        order = index[np.argsort(part[:, axis], kind="stable")]
+        cumulative = np.cumsum(w[order])
+        k_left = k // 2
+        cut = int(np.clip(np.searchsorted(cumulative, cumulative[-1] * k_left / k) + 1, 1, len(order) - 1))
+        split(order[:cut], k_left)
+        split(order[cut:], k - k_left)
+
+    split(np.arange(len(points)), n)
+    return np.array(seeds).reshape(-1, 3)
 
 
 def seeds(

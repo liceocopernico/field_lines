@@ -166,11 +166,11 @@ def test_conductor_model_is_solved_in_the_background(window, qtbot):
     window.panel.radio_conductors.setChecked(True)
     assert window.scene.uses_conductor
     assert window.scene.conductor is None
-    assert window.panel.model_status.text() == tr("computing")
+    assert window.status_light.text() == tr("computing") and window.status_light.flashing()
     assert not window.panel.charges_group.isVisibleTo(window.panel)  # point charges do not take part
     assert window.panel.spheres_group.isVisibleTo(window.panel)
     wait_for_solve(window, qtbot)
-    assert window.panel.model_status.text() == ""
+    assert window.status_light.text() != tr("computing")
     assert window.panel.readouts["readout_dV"].text() == "500 V"
     assert window.panel.readouts["readout_C"].text() == "5.26 pF"
     assert all(line.end == "plate" for line in window.view.lines)
@@ -209,7 +209,8 @@ def test_touching_spheres_are_not_solved(window, qtbot):
     window.load_preset("two_spheres")
     window.panel.sphere_table.cellWidget(1, 2).setValue(-1.0)  # x of the second sphere, onto the first
     assert window._touching and window.scene.conductor is None
-    assert window.panel.model_status.text() == tr("spheres_touch")
+    assert window.status_light.text() == tr("spheres_touch") and window.status_light.state == "error"
+    assert not window.status_light.flashing()
 
 
 def qt_point(window, world):
@@ -385,3 +386,19 @@ def test_choosing_the_sigma_colour_scale(window, qtbot):
     assert hi - lo >= 0.019 * (lo + hi) / 2  # ...but not narrower than the solver's accuracy
     window.panel.sigma_scale.setCurrentIndex(window.panel.sigma_scale.findData("log"))
     assert tr("bar_sigma_abs") in window.plotter.scalar_bars and tr("bar_sigma") not in window.plotter.scalar_bars
+
+
+def test_status_light_in_the_status_bar(window, qtbot):
+    model_group = window.panel.radio_charges.parentWidget()
+    height = model_group.sizeHint().height()
+    window.load_preset("sphere")
+    assert window.status_light.state == "busy" and window.status_light.flashing()
+    assert model_group.sizeHint().height() == height  # the panel does not move while computing
+    wait_for_solve(window, qtbot)
+    wait_for_fields(window, qtbot)
+    assert window.status_light.state == "ready" and window.status_light.text() == tr("ready")
+    assert not window.status_light.flashing()
+    window.panel.equipotentials_box.setChecked(True)  # the views are recomputed in the background
+    assert window.status_light.text() == tr("updating_views") and window.status_light.flashing()
+    wait_for_fields(window, qtbot)
+    assert window.status_light.state == "ready"
