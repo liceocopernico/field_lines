@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from PySide6 import QtCore, QtWidgets
 
+from field_lines.conductors import Sphere
 from field_lines.presets import PRESETS
 from field_lines.scene import VIEW_HALF, Capacitor
 from field_lines.sources import AXES, PointCharge
@@ -46,10 +47,14 @@ def spin_box(lo: float, hi: float, step: float, decimals: int, value: float) -> 
 
 class Panel(QtWidgets.QWidget):
     planar_changed = QtCore.Signal(bool)
+    kind_changed = QtCore.Signal(str)  # "charges" or "conductors"
     preset_chosen = QtCore.Signal(str)
     charge_edited = QtCore.Signal(int, float, float, float, float)  # row, q [nC], x, y, z [cm]
     add_charge_requested = QtCore.Signal(int)  # sign
     remove_requested = QtCore.Signal(int)  # row
+    sphere_edited = QtCore.Signal(int, float, float, float, float, float)  # row, V, radius, x, y, z [cm]
+    add_sphere_requested = QtCore.Signal()
+    remove_sphere_requested = QtCore.Signal(int)  # row
     capacitor_changed = QtCore.Signal()
     views_changed = QtCore.Signal()
     replay_requested = QtCore.Signal()
@@ -62,8 +67,10 @@ class Panel(QtWidgets.QWidget):
         self._combo_keys: list[tuple[QtWidgets.QComboBox, list[str]]] = []
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self._space_group())
+        layout.addWidget(self._model_group())
         layout.addWidget(self._preset_group())
         layout.addWidget(self._charges_group())
+        layout.addWidget(self._spheres_group())
         layout.addWidget(self._capacitor_group())
         layout.addWidget(self._views_group())
         layout.addWidget(self._animation_group())
@@ -107,6 +114,24 @@ class Panel(QtWidgets.QWidget):
         layout.addLayout(row)
         return group
 
+    def _model_group(self):
+        group, layout = self._group("group_model")
+        self.radio_charges = QtWidgets.QRadioButton()
+        self.radio_conductors = QtWidgets.QRadioButton()
+        self._text(self.radio_charges.setText, "kind_charges")
+        self._text(self.radio_conductors.setText, "kind_conductors")
+        self.radio_charges.setChecked(True)
+        self.radio_conductors.toggled.connect(
+            lambda conductors: self.kind_changed.emit("conductors" if conductors else "charges")
+        )
+        layout.addWidget(self.radio_charges)
+        layout.addWidget(self.radio_conductors)
+        self.model_status = QtWidgets.QLabel()
+        self.model_status.setWordWrap(True)
+        self.model_status.hide()
+        layout.addWidget(self.model_status)
+        return group
+
     def _preset_group(self):
         group, layout = self._group("group_preset")
         keys = list(PRESETS)
@@ -138,10 +163,26 @@ class Panel(QtWidgets.QWidget):
         row.addWidget(self.add_positive)
         row.addWidget(self.add_negative)
         layout.addLayout(row)
-        self.charges_note = self._label("charges_disabled")
-        self.charges_note.setWordWrap(True)
-        self.charges_note.hide()
-        layout.addWidget(self.charges_note)
+        return group
+
+    def _spheres_group(self):
+        group, layout = self._group("group_spheres")
+        self.spheres_group = group
+        self.sphere_table = QtWidgets.QTableWidget(0, 7)
+        self.sphere_table.setHorizontalHeaderLabels(["V [V]", "r [cm]", "x [cm]", "y [cm]", "z [cm]", "Q [nC]", ""])
+        header = self.sphere_table.horizontalHeader()
+        for column in range(6):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.sphere_table.verticalHeader().setVisible(False)
+        self.sphere_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.sphere_table.setMinimumHeight(110)
+        layout.addWidget(self.sphere_table)
+        self.add_sphere = QtWidgets.QPushButton()
+        self._text(self.add_sphere.setText, "add_sphere")
+        self.add_sphere.clicked.connect(_emit(self.add_sphere_requested))
+        layout.addWidget(self.add_sphere)
+        group.hide()
         return group
 
     def _capacitor_group(self):
@@ -157,7 +198,6 @@ class Panel(QtWidgets.QWidget):
         self.width_box = spin_box(1, 20, 0.5, 1, defaults.width / CM)
         self.height_box = spin_box(1, 20, 0.5, 1, defaults.height / CM)
         self.separation_box = spin_box(0.2, 15, 0.1, 1, defaults.separation / CM)
-        self.model_combo = self._combo(["model_sigma", "model_conductor"], ["sigma", "conductor"])
         self.sigma_box = spin_box(-10, 10, 0.05, 2, defaults.sigma / UC_PER_M2)
         self.voltage_box = spin_box(-10000, 10000, 50, 0, defaults.voltage)
         for box in (self.width_box, self.height_box, self.separation_box):
@@ -169,14 +209,12 @@ class Panel(QtWidgets.QWidget):
             ("plate_width", self.width_box),
             ("plate_height", self.height_box),
             ("separation", self.separation_box),
-            ("model", self.model_combo),
         ):
             form.addRow(self._label(key), widget)
         form.addRow(self.sigma_label, self.sigma_box)
         form.addRow(self.voltage_label, self.voltage_box)
         for box in (self.width_box, self.height_box, self.separation_box, self.sigma_box, self.voltage_box):
             box.valueChanged.connect(_emit(self.capacitor_changed))
-        self.model_combo.currentIndexChanged.connect(self._model_changed)
         self.plate_sigma_box = QtWidgets.QCheckBox()
         self._text(self.plate_sigma_box.setText, "plate_sigma")
         self.plate_sigma_box.toggled.connect(_emit(self.views_changed))
@@ -187,12 +225,9 @@ class Panel(QtWidgets.QWidget):
             value.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
             self.readouts[key] = value
             form.addRow(self._label(key), value)
-        self.capacitor_status = QtWidgets.QLabel()
-        self.capacitor_status.setWordWrap(True)
-        form.addRow(self.capacitor_status)
         layout.addWidget(self.capacitor_form)
         self.capacitor_form.hide()
-        self._model_changed()
+        self.set_kind("charges")
         return group
 
     def _views_group(self):
@@ -288,13 +323,17 @@ class Panel(QtWidgets.QWidget):
         self.capacitor_form.setVisible(checked)
         self.capacitor_changed.emit()
 
-    def _model_changed(self) -> None:
-        conductor = self.model_combo.currentData() == "conductor"
-        self.sigma_label.setVisible(not conductor)
-        self.sigma_box.setVisible(not conductor)
-        self.voltage_label.setVisible(conductor)
-        self.voltage_box.setVisible(conductor)
-        self.capacitor_changed.emit()
+    def set_kind(self, kind: str) -> None:
+        """Show the controls of the model: point charges and σ, or spheres and ΔV."""
+        conductors = kind == "conductors"
+        with QtCore.QSignalBlocker(self.radio_charges), QtCore.QSignalBlocker(self.radio_conductors):
+            (self.radio_conductors if conductors else self.radio_charges).setChecked(True)
+        self.charges_group.setVisible(not conductors)
+        self.spheres_group.setVisible(conductors)
+        self.sigma_label.setVisible(not conductors)
+        self.sigma_box.setVisible(not conductors)
+        self.voltage_label.setVisible(conductors)
+        self.voltage_box.setVisible(conductors)
 
     def _speed_changed(self, value: int) -> None:
         self.speed_value.setText(f"{value} cm/s")
@@ -310,14 +349,78 @@ class Panel(QtWidgets.QWidget):
                 combo.setItemText(index, tr(key))
         for row in range(self.table.rowCount()):
             self.table.cellWidget(row, 4).setToolTip(tr("remove"))
+        for row in range(self.sphere_table.rowCount()):
+            self.sphere_table.cellWidget(row, 6).setToolTip(tr("remove"))
 
     def set_planar(self, planar: bool) -> None:
         with QtCore.QSignalBlocker(self.radio_2d), QtCore.QSignalBlocker(self.radio_3d):
             (self.radio_2d if planar else self.radio_3d).setChecked(True)
         self.table.setColumnHidden(3, planar)
+        self.sphere_table.setColumnHidden(4, planar)
+        self._fit_sphere_table()
 
     def set_preset(self, key: str) -> None:
         self.preset_combo.setCurrentIndex(self.preset_combo.findData(key))
+
+    def set_spheres(self, spheres: Sequence[Sphere], charges: Sequence[float | None]) -> None:
+        """The sphere table: spin boxes for V, r, x, y, z and the sphere's charge Q.
+
+        With as many rows as before, the values change in place (a box being typed in keeps its focus).
+        """
+        if len(spheres) == self.sphere_table.rowCount():
+            for row, sphere in enumerate(spheres):
+                self.update_sphere(row, sphere)
+            self.set_sphere_charges(charges)
+            return
+        self.sphere_table.setRowCount(len(spheres))
+        ranges = [(-10000, 10000, 100, 0), (0.3, 5, 0.1, 1)] + [(-COORDINATE_RANGE, COORDINATE_RANGE, 0.5, 1)] * 3
+        for row, sphere in enumerate(spheres):
+            values = [sphere.voltage, sphere.radius / CM, *(sphere.center / CM)]
+            for column, (value, (lo, hi, step, decimals)) in enumerate(zip(values, ranges)):
+                box = spin_box(lo, hi, step, decimals, value)
+                box.setFrame(False)
+                box.valueChanged.connect(lambda _value, r=row: self._sphere_row_edited(r))
+                self.sphere_table.setCellWidget(row, column, box)
+            self.sphere_table.setCellWidget(row, 5, QtWidgets.QLabel())
+            remove = QtWidgets.QToolButton()
+            remove.setText("✕")
+            remove.setToolTip(tr("remove"))
+            remove.clicked.connect(lambda _checked=False, r=row: self.remove_sphere_requested.emit(r))
+            self.sphere_table.setCellWidget(row, 6, remove)
+        self.set_sphere_charges(charges)
+        self._fit_sphere_table()
+
+    def _fit_sphere_table(self) -> None:
+        """Make the sphere table as wide as its columns, so that the panel widens instead of scrolling it."""
+        table = self.sphere_table
+        if table.rowCount() == 0:
+            return
+        width = 2 * table.frameWidth()
+        for column in range(table.columnCount()):
+            if not table.isColumnHidden(column):
+                cell = table.cellWidget(0, column)
+                header = table.horizontalHeader().sectionSizeHint(column)
+                width += max(cell.sizeHint().width() if cell is not None else 0, header)
+        table.setMinimumWidth(width)
+
+    def set_sphere_charges(self, charges: Sequence[float | None]) -> None:
+        for row, q in enumerate(charges):
+            label = self.sphere_table.cellWidget(row, 5)
+            if label is not None:
+                label.setText("—" if q is None else "0" if abs(q) < 5e-4 * NC else f"{q / NC:.3g}")
+
+    def update_sphere(self, row: int, sphere: Sphere) -> None:
+        """Show a sphere's new values without emitting sphere_edited (e.g. while it is dragged)."""
+        values = [sphere.voltage, sphere.radius / CM, *(sphere.center / CM)]
+        for column, value in enumerate(values):
+            box = self.sphere_table.cellWidget(row, column)
+            if box is not None:
+                with QtCore.QSignalBlocker(box):
+                    box.setValue(value)
+
+    def _sphere_row_edited(self, row: int) -> None:
+        values = [self.sphere_table.cellWidget(row, column).value() for column in range(5)]
+        self.sphere_edited.emit(row, *values)
 
     def set_charges(self, charges: Sequence[PointCharge], enabled: bool = True) -> None:
         """Rebuild the table, one row of spin boxes per charge."""
@@ -338,7 +441,6 @@ class Panel(QtWidgets.QWidget):
         self.table.setEnabled(enabled)
         self.add_positive.setEnabled(enabled)
         self.add_negative.setEnabled(enabled)
-        self.charges_note.setVisible(not enabled)
 
     def update_charge(self, row: int, charge: PointCharge) -> None:
         """Show a charge's new values without emitting charge_edited (e.g. while it is dragged)."""
@@ -355,7 +457,7 @@ class Panel(QtWidgets.QWidget):
 
     def set_capacitor(self, capacitor: Capacitor | None) -> None:
         boxes = (self.capacitor_box, self.width_box, self.height_box, self.separation_box, self.sigma_box)
-        blockers = [QtCore.QSignalBlocker(w) for w in (*boxes, self.voltage_box, self.model_combo)]
+        blockers = [QtCore.QSignalBlocker(w) for w in (*boxes, self.voltage_box)]
         self.capacitor_box.setChecked(capacitor is not None)
         self.capacitor_form.setVisible(capacitor is not None)
         if capacitor is not None:
@@ -364,14 +466,8 @@ class Panel(QtWidgets.QWidget):
             self.separation_box.setValue(capacitor.separation / CM)
             self.sigma_box.setValue(capacitor.sigma / UC_PER_M2)
             self.voltage_box.setValue(capacitor.voltage)
-            self.model_combo.setCurrentIndex(self.model_combo.findData(capacitor.model))
         for blocker in blockers:
             blocker.unblock()
-        self._model_changed_quietly()
-
-    def _model_changed_quietly(self) -> None:
-        with QtCore.QSignalBlocker(self):
-            self._model_changed()
 
     def capacitor(self, normal: str) -> Capacitor | None:
         """The capacitor as the panel shows it, or None if it is switched off."""
@@ -383,15 +479,14 @@ class Panel(QtWidgets.QWidget):
             separation=self.separation_box.value() * CM,
             sigma=self.sigma_box.value() * UC_PER_M2,
             voltage=self.voltage_box.value(),
-            model=self.model_combo.currentData(),
             normal=normal,
         )
 
     def set_readouts(self, values: dict[str, str], status: str = "") -> None:
         for key, label in self.readouts.items():
             label.setText(values.get(key, "—"))
-        self.capacitor_status.setText(status)
-        self.capacitor_status.setVisible(bool(status))
+        self.model_status.setText(status)
+        self.model_status.setVisible(bool(status))
 
     def view_options(self) -> ViewOptions:
         return ViewOptions(

@@ -8,11 +8,25 @@ from field_lines.units import CM
 
 
 def test_presets_load_and_trace():
+    from field_lines.conductors import Solver
+
     scene = Scene()
     for key in presets.PRESETS:
         presets.load(scene, key)
+        if scene.uses_conductor:
+            scene.conductor = Solver(scene.conductor_plates(), scene.spheres).solve(scene.voltages())
         lines = scene.lines()
-        assert (len(lines) > 0) == (key != "empty")
+        assert (len(lines) > 0) == (key != "empty"), key
+
+
+def test_presets_choose_their_model():
+    scene = Scene()
+    presets.load(scene, "sphere")
+    assert scene.kind == "conductors" and len(scene.spheres) == 1
+    presets.load(scene, "capacitor")  # keeps the model that is on
+    assert scene.kind == "conductors" and scene.spheres == [] and scene.capacitor is not None
+    presets.load(scene, "dipole")
+    assert scene.kind == "charges" and scene.capacitor is None
 
 
 def test_going_2d_flattens_charges_and_turns_the_capacitor():

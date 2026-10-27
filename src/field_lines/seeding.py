@@ -14,6 +14,7 @@ from field_lines.sources import FieldModel, Plate, PointCharge
 from field_lines.units import NC
 
 PLATE_SAMPLES = 48  # candidate seed positions along each side of a plate face
+SPHERE_SAMPLES = 800  # candidate seed positions on a sphere (in 2D: around its circle)
 
 
 def fibonacci_sphere(n: int) -> np.ndarray:
@@ -80,8 +81,22 @@ def plate_seeds(model: FieldModel, plate: Plate, n: int, offset: float, sign: in
         flux = sign * model.field(points) @ normal
         candidates.append(points)
         weights.append(np.maximum(flux, 0.0))
-    candidates = np.concatenate(candidates)
-    weights = np.concatenate(weights)
+    return _spread(np.concatenate(candidates), np.concatenate(weights), n)
+
+
+def sphere_seeds(model: FieldModel, center: np.ndarray, radius: float, n: int, offset: float, sign: int, planar: bool):
+    """n points just off a metallic sphere, spread in proportion to the flux leaving each part of it.
+
+    planar: only points on its circle in the z = 0 plane (its centre must lie in that plane).
+    """
+    directions = circle(SPHERE_SAMPLES) if planar else fibonacci_sphere(SPHERE_SAMPLES)
+    candidates = center + (radius + offset) * directions
+    flux = sign * np.einsum("ij,ij->i", model.field(candidates), directions)
+    return _spread(candidates, np.maximum(flux, 0.0), n)
+
+
+def _spread(candidates: np.ndarray, weights: np.ndarray, n: int) -> np.ndarray:
+    """n of the candidates, as many from each part as its share of the weight (systematic sampling)."""
     total = weights.sum()
     if n == 0 or total == 0:
         return np.empty((0, 3))
@@ -99,8 +114,19 @@ def seeds(
     charge_radius: float,
     plate_offset: float,
     planar: bool,
+    spheres: Sequence = (),
+    conductor=None,
+    sphere_offset: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Seed points and directions (+1 along E, -1 against it) for all sources."""
+    """Seed points and directions (+1 along E, -1 against it) for all sources.
+
+    In the conductors model (conductor: a conductors.ConductorSolution, whose
+    conductors are the plates, then the spheres) a conductor may be charged
+    positive in some parts and negative in others: the lines from a conductor
+    are as many as the charge of its parts of the seeding sign.
+    """
+    if conductor is not None:
+        return _conductor_seeds(model, plates, spheres, conductor, lines_per_nc, plate_offset, sphere_offset, planar)
     sign = seed_sign(charges, plates)
     points = [np.empty((0, 3))]
     for charge in charges:
@@ -110,5 +136,21 @@ def seeds(
         if plate.charge * sign > 0:
             n = line_count(plate.charge, lines_per_nc)
             points.append(plate_seeds(model, plate, n, plate_offset, sign, planar))
+    points = np.concatenate(points)
+    return points, np.full(len(points), sign)
+
+
+def _conductor_seeds(model, plates, spheres, conductor, lines_per_nc, plate_offset, sphere_offset, planar):
+    count = len(plates) + len(spheres)
+    positive = sum(conductor.signed_charge(k, 1) for k in range(count))
+    negative = sum(conductor.signed_charge(k, -1) for k in range(count))
+    sign = 1 if positive >= negative else -1
+    points = [np.empty((0, 3))]
+    for k, plate in enumerate(plates):
+        n = line_count(conductor.signed_charge(k, sign), lines_per_nc)
+        points.append(plate_seeds(model, plate, n, plate_offset, sign, planar))
+    for k, sphere in enumerate(spheres):
+        n = line_count(conductor.signed_charge(len(plates) + k, sign), lines_per_nc)
+        points.append(sphere_seeds(model, sphere.center, sphere.radius, n, sphere_offset, sign, planar))
     points = np.concatenate(points)
     return points, np.full(len(points), sign)

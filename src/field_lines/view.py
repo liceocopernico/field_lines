@@ -20,7 +20,9 @@ OUTLINE_COLOR = (0.8, 0.8, 0.8)
 EQUIPOTENTIAL_COLOR = (0.1, 0.55, 0.25)
 V_CMAP = "RdBu_r"  # red for positive potentials, blue for negative, like the charges
 PLATE_THICKNESS = 0.0015  # m, only for drawing
-FACE_STRIP = 0.002  # m: in 2D each face of a cut plate is drawn as a strip this wide
+FACE_STRIP = 0.002  # m: in 2D each face of a cut plate is drawn as a strip this wide, a sphere's rim as a ring
+PLANE_BELOW = 0.0003  # m: in 2D a sphere's inside is drawn just below the lines
+SPHERE_INSIDE = (0.85, 0.85, 0.85)
 SIGMA_BAR = dict(vertical=False, position_x=0.3, position_y=0.02, width=0.4, height=0.1, fmt="%.2g")
 # plasma without its palest yellow, which vanishes on white
 LINE_CMAP = ListedColormap(colormaps["plasma"](np.linspace(0.0, 0.85, 256)))
@@ -125,6 +127,23 @@ def face_strips(density: PlateDensity) -> list[pv.StructuredGrid]:
     return strips
 
 
+def sphere_ring(points: np.ndarray, quads: np.ndarray, sigma: np.ndarray, samples: int = 144) -> pv.StructuredGrid:
+    """2D: the sphere's rim where it crosses its centre's z plane, a ring just inside it coloured by σ there."""
+    center = points.mean(axis=0)
+    radius = np.linalg.norm(points[0] - center)
+    angle = np.linspace(0, 2 * np.pi, samples + 1)
+    rim = np.column_stack((np.cos(angle), np.sin(angle), np.zeros(samples + 1)))
+    panel_dirs = points[quads].mean(axis=1) - center
+    panel_dirs /= np.linalg.norm(panel_dirs, axis=1, keepdims=True)
+    nearest = np.argmax(rim @ panel_dirs.T, axis=1)  # the panel each rim point lies on
+    r = np.array([radius - FACE_STRIP, radius])
+    x = center[0] + np.outer(rim[:, 0], r)
+    y = center[1] + np.outer(rim[:, 1], r)
+    ring = pv.StructuredGrid(x, y, np.full(x.shape, center[2]))
+    ring.point_data["sigma"] = np.repeat(sigma[nearest][:, None], 2, axis=1).ravel(order="F") / UC_PER_M2
+    return ring
+
+
 class SceneView:
     def __init__(self, plotter: pv.Plotter):
         self.pl = plotter
@@ -133,6 +152,8 @@ class SceneView:
         self.line_mesh = pv.PolyData()
         self.line_actor = None
         self.plate_actors: list = []
+        self.sphere_actors: list[list] = []  # the actors of each metallic sphere
+        self.sphere_centers: list[np.ndarray] = []  # where each sphere was drawn
         self.slice_actor = None
         self.lines_visible = True
         self.pl.set_background(BACKGROUND)
@@ -247,17 +268,34 @@ class SceneView:
         )
 
     def set_plates(
-        self, plates: Sequence[Plate], densities: Sequence[PlateDensity] | None = None, planar: bool = False
+        self,
+        plates: Sequence[Plate],
+        densities: Sequence[PlateDensity] | None = None,
+        planar: bool = False,
+        spheres: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
     ) -> None:
-        """The plates: plain red and blue, or each face coloured by its surface charge density."""
-        for actor in self.plate_actors:
+        """The plates (plain red and blue, or each face coloured by its σ) and the metallic spheres (by σ).
+
+        spheres: for each sphere its corner points, quads and σ per quad, as Scene.sphere_densities gives.
+        """
+        for actor in self.plate_actors + [a for actors in self.sphere_actors for a in actors]:
             self.pl.remove_actor(actor, render=False)
-        self.plate_actors = []
+        self.plate_actors, self.sphere_actors, self.sphere_centers = [], [], []
         for language in LANGUAGES:  # removing the actors leaves their colour bar behind
             if STRINGS["bar_sigma"][language] in self.pl.scalar_bars:
                 self.pl.remove_scalar_bar(STRINGS["bar_sigma"][language], render=False)
+        values = [np.concatenate((d.inner.ravel(), d.outer.ravel())) for d in densities or []]
+        values += [sigma for _, _, sigma in spheres or [] if sigma is not None]
+        limit = 1.0
+        if values:  # the edges may saturate
+            limit = float(np.percentile(np.abs(np.concatenate(values)), 95)) / UC_PER_M2 or 1.0
         if densities:
-            self._coloured_plates(densities, planar)
+            self._coloured_plates(densities, planar, limit)
+        for points, quads, sigma in spheres or []:
+            self._coloured_sphere(points, quads, sigma, planar, limit)
+        if tr("bar_sigma") in self.pl.scalar_bars:
+            self.pl.scalar_bars[tr("bar_sigma")].SetTextPositionToPrecedeScalarBar()  # labels clear of the title
+        if densities:
             return
         for plate in plates:
             half = np.array([plate.width / 2, plate.height / 2, PLATE_THICKNESS / 2])
@@ -269,25 +307,53 @@ class SceneView:
             )
             self.plate_actors.append(actor)
 
-    def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool) -> None:
-        values = np.concatenate([np.concatenate((d.inner.ravel(), d.outer.ravel())) for d in densities])
-        limit = float(np.percentile(np.abs(values), 95)) / UC_PER_M2 or 1.0  # the edges may saturate
+    def _sigma_mesh(self, mesh, limit: float, planar: bool, **style):
+        return self.pl.add_mesh(
+            mesh,
+            scalars="sigma",
+            cmap=V_CMAP,
+            clim=(-limit, limit),
+            lighting=not planar,
+            pickable=False,
+            reset_camera=False,
+            scalar_bar_args=SIGMA_BAR | dict(title=tr("bar_sigma")),
+            **style,
+        )
+
+    def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool, limit: float) -> None:
         for density in densities:
-            meshes = face_strips(density) if planar else face_sheets(density)
-            for mesh in meshes:
-                actor = self.pl.add_mesh(
-                    mesh,
-                    scalars="sigma",
-                    cmap=V_CMAP,
-                    clim=(-limit, limit),
-                    lighting=not planar,
-                    pickable=False,
-                    reset_camera=False,
-                    scalar_bar_args=SIGMA_BAR | dict(title=tr("bar_sigma")),
-                )
-                self.plate_actors.append(actor)
-        # the labels below the bar, so that they do not run into the title above it
-        self.pl.scalar_bars[tr("bar_sigma")].SetTextPositionToPrecedeScalarBar()
+            for mesh in face_strips(density) if planar else face_sheets(density):
+                self.plate_actors.append(self._sigma_mesh(mesh, limit, planar))
+
+    def _coloured_sphere(self, points, quads, sigma: np.ndarray | None, planar: bool, limit: float):
+        """A metallic sphere coloured by σ, or plain grey while σ is not known yet."""
+        center = points.mean(axis=0)
+        if planar:
+            radius = np.linalg.norm(points[0] - center)
+            disc = pv.Disc(center=center - [0, 0, PLANE_BELOW], inner=0.0, outer=radius, c_res=72)
+            actors = [self.pl.add_mesh(disc, color=SPHERE_INSIDE, lighting=False, pickable=False, reset_camera=False)]
+            if sigma is not None:
+                actors.append(self._sigma_mesh(sphere_ring(points, quads, sigma), limit, planar))
+        else:
+            mesh = pv.PolyData(points, np.hstack((np.full((len(quads), 1), 4), quads)).ravel())
+            if sigma is None:
+                actors = [
+                    self.pl.add_mesh(
+                        mesh.clean(), color=SPHERE_INSIDE, smooth_shading=True, pickable=False, reset_camera=False
+                    )
+                ]
+            else:
+                mesh.cell_data["sigma"] = sigma / UC_PER_M2
+                mesh = mesh.clean().cell_data_to_point_data()  # smooth colours across the panels
+                actors = [self._sigma_mesh(mesh, limit, planar, smooth_shading=True)]
+        self.sphere_actors.append(actors)
+        self.sphere_centers.append(center)
+
+    def move_sphere(self, index: int, center: np.ndarray) -> None:
+        """Draw sphere index at a new centre (while it is dragged, before its charges are solved again)."""
+        if index < len(self.sphere_actors):
+            for actor in self.sphere_actors[index]:
+                actor.position = np.asarray(center) - self.sphere_centers[index]
 
     def set_planar(self, planar: bool) -> None:
         """2D: look down the z axis with a parallel camera that pans instead of rotating."""

@@ -1,7 +1,7 @@
 """The main window: wires the panel, the 3D view and the scene together."""
 
 import argparse
-import math
+import copy
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -12,11 +12,18 @@ from PySide6 import QtCore, QtWidgets
 from pyvistaqt import QtInteractor
 
 from field_lines import conductors, presets, sampling, strings
-from field_lines.conductors import ConductorSolution
-from field_lines.interaction import ChargeHandles, MouseEvents, charge_under_mouse, mouse_on_plane, pick_on
+from field_lines.conductors import Solver, Sphere
+from field_lines.interaction import (
+    ChargeHandles,
+    MouseEvents,
+    ball_under_mouse,
+    charge_under_mouse,
+    mouse_on_plane,
+    pick_on,
+)
 from field_lines.panel import Panel, ViewOptions
 from field_lines.sampling import Exclusion
-from field_lines.scene import VIEW_HALF, Capacitor, Scene, charge_radius
+from field_lines.scene import VIEW_HALF, Scene, charge_radius
 from field_lines.sources import PointCharge
 from field_lines.strings import tr
 from field_lines.units import CM, NC, format_quantity
@@ -24,8 +31,9 @@ from field_lines.view import SceneView
 
 FRAME_MS = 33  # growth animation: about 30 frames per second
 FIELDS_DELAY_MS = 120  # equipotentials, arrows and plane are recomputed this long after the last change
-SOLVE_DELAY_MS = 300  # the conductor model is solved this long after the capacitor's last change
-KEPT_SOLUTIONS = 4  # solved geometries kept for going back to them (up to ~20 MB each)
+SOLVE_DELAY_MS = 300  # the conductors are solved again this long after their geometry last changed
+KEPT_SOLVERS = 4  # solved geometries kept for going back to them
+NEW_SPHERE = dict(radius=1.5 * CM, voltage=1000.0)
 WHEEL_STEP = 0.25 * NC  # charge change per wheel notch
 NEW_CHARGE = 2 * NC
 
@@ -49,7 +57,7 @@ class FieldsWorker(QtCore.QObject):
 
 
 class SolverWorker(QtCore.QObject):
-    """Carries a solved conductor model (geometry key, OctantGrid or None) back to the GUI thread."""
+    """Carries a solved geometry (key, conductors.Solver or None) back to the GUI thread."""
 
     finished = QtCore.Signal(object, object)
 
@@ -75,10 +83,6 @@ class PanelScroll(QtWidgets.QScrollArea):
         self.setMinimumWidth(panel.minimumSizeHint().width() + extra)
 
 
-def geometry_key(capacitor: Capacitor) -> tuple[float, float, float]:
-    return (round(capacitor.width, 9), round(capacitor.height, 9), round(capacitor.separation, 9))
-
-
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, preset: str = "dipole", planar: bool = False):
         super().__init__()
@@ -89,10 +93,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.plotter)
         self.view = SceneView(self.plotter)
         self.handles = ChargeHandles(self.plotter, self._charge_dragged)
+        self.sphere_handles = ChargeHandles(self.plotter, self._sphere_dragged)
         self.mouse = MouseEvents(self.plotter, self._clicked, self._mouse_moved, self._wheel)
         for key, action in (
             ("c", lambda: self._add_charge_at_mouse(1)),
             ("m", lambda: self._add_charge_at_mouse(-1)),
+            ("s", self._add_sphere_at_mouse),
             ("t", self._flip_charge_at_mouse),
             ("r", lambda: self.load_preset("empty")),
         ):
@@ -131,13 +137,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.solver_worker.finished.connect(self._solved)
         self._solver = ThreadPoolExecutor(max_workers=1)
         self._solver_future = None
-        self._solutions: dict[tuple[float, float, float], conductors.OctantGrid] = {}
+        self._solvers: dict[tuple, Solver] = {}
         self._solve_timer = QtCore.QTimer(self, singleShot=True, interval=SOLVE_DELAY_MS)
         self._solve_timer.timeout.connect(self._start_solve)
-        self._clamped_to: float | None = None  # separation forced on the conductor model, m
+        self._touching = False  # spheres touching each other or the plates: nothing can be solved
+        self._grow_after_solve = False  # whether the lines grow again once the pending solve is done
 
         p = self.panel
         p.planar_changed.connect(self.set_planar)
+        p.kind_changed.connect(self.set_kind)
+        p.sphere_edited.connect(self._sphere_edited)
+        p.add_sphere_requested.connect(self._add_sphere_from_panel)
+        p.remove_sphere_requested.connect(self._remove_sphere)
         p.preset_chosen.connect(self.load_preset)
         p.charge_edited.connect(self._charge_edited)
         p.add_charge_requested.connect(self._add_charge_from_panel)
@@ -158,13 +169,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def load_preset(self, key: str) -> None:
         presets.load(self.scene, key)
         self.panel.set_preset(key)
-        self._clamped_to = None
-        self._update_conductor()
+        self._update_conductor(grow=True)
+        self.refresh(animate=True)
+
+    def set_kind(self, kind: str) -> None:
+        """Switch between the point-charge model and the conductors model."""
+        self.scene.kind = kind
+        self.scene.click_seeds = []
+        self._update_conductor(grow=True)
         self.refresh(animate=True)
 
     def set_planar(self, planar: bool) -> None:
         self.scene.set_planar(planar)
-        self._update_conductor()  # the capacitor may have turned
+        self._update_conductor(grow=True)  # the capacitor may have turned
         self.panel.set_planar(planar)
         self.view.set_planar(planar)
         self.hint.setText(tr("hint_2d" if planar else "hint_3d"))
@@ -172,18 +189,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def refresh(self, animate: bool) -> None:
         """Show the whole scene again after its sources changed."""
-        charges_enabled = not self.scene.uses_conductor
-        self.panel.set_charges(self.scene.charges, enabled=charges_enabled)
+        self.panel.set_kind(self.scene.kind)
+        self.panel.set_charges(self.scene.charges)
+        self.panel.set_spheres(self.scene.spheres, self._sphere_charges())
         self.panel.set_capacitor(self.scene.capacitor)
         self.handles.set_charges(self.scene.active_charges())
+        self.sphere_handles.set_spheres(self.scene.active_spheres())
         self.show_plates()
         self._update_readouts()
         self.request_lines(animate)
 
     def show_plates(self) -> None:
-        """The plates, coloured by their surface charge density if the panel asks for it."""
+        """The plates (coloured by σ if the panel asks for it) and the metallic spheres (always by σ)."""
         densities = self.scene.plate_densities() if self.panel.view_options().plate_sigma else None
-        self.view.set_plates(self.scene.plates(), densities, self.scene.planar)
+        self.view.set_plates(self.scene.plates(), densities, self.scene.planar, self.scene.sphere_densities())
+
+    def _sphere_charges(self) -> list[float | None]:
+        return [self.scene.sphere_charge(k) for k in range(len(self.scene.spheres))]
+
+    def _computing(self) -> bool:
+        """Whether the conductors are being solved (their old lines stay until then)."""
+        scene = self.scene
+        has_conductors = scene.capacitor is not None or scene.spheres
+        return scene.uses_conductor and scene.conductor is None and has_conductors and not self._touching
 
     def request_lines(self, animate: bool) -> None:
         """Trace the lines again, once the current Qt events are handled (many requests, one trace)."""
@@ -191,6 +219,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._retrace_timer.start()
 
     def _retrace(self) -> None:
+        if self._computing():
+            return  # keep the old lines until the new charges are known
         lines = self.scene.lines()
         self.view.set_lines(lines)
         if self._animate_next:
@@ -220,11 +250,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fields_ready(result)
             return
         exclusions = [Exclusion(c.position.copy(), charge_radius(c.q)) for c in self.scene.active_charges()]
+        exclusions += [Exclusion(s.center.copy(), s.radius) for s in self.scene.active_spheres()]
+        conductors_model = self.scene.uses_conductor
 
         def job():
             try:
                 if options.equipotentials:
-                    result.equipotentials, _ = sampling.equipotentials(model, result.planar, options.levels, exclusions)
+                    resolution = None
+                    if conductors_model and not result.planar:
+                        resolution = sampling.EQUIPOTENTIAL_RES_CONDUCTORS
+                    result.equipotentials, _ = sampling.equipotentials(
+                        model, result.planar, options.levels, exclusions, resolution
+                    )
                 if options.arrows:
                     result.arrows = sampling.arrows(model, result.planar, exclusions)
                 if options.slice:
@@ -323,6 +360,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return charge_under_mouse(self.plotter, self.scene.charges, display)
 
+    def _sphere_at(self, display) -> int | None:
+        balls = [(s.center, s.radius) for s in self.scene.active_spheres()]
+        return ball_under_mouse(self.plotter, balls, display)
+
     def _wheel(self, display, step: int) -> bool:
         """A wheel notch on a charge changes its charge (and does not zoom)."""
         index = self._charge_at(display)
@@ -359,8 +400,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _clicked(self, display) -> None:
-        if self._charge_at(display) is not None:
-            return  # a click on a charge (that grabbed it) is not a click on the space behind it
+        if self._charge_at(display) is not None or self._sphere_at(display) is not None:
+            return  # a click on a charge or a sphere (that grabbed it) is not a click on the space behind it
         point = self._point_under_mouse(display)
         if point is None or np.any(np.abs(point) > VIEW_HALF):
             return
@@ -392,58 +433,113 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _capacitor_edited(self) -> None:
         normal = self.scene.capacitor.normal if self.scene.capacitor else ("x" if self.scene.planar else "z")
-        capacitor = self.panel.capacitor(normal)
-        self._clamped_to = None
-        if capacitor is not None and capacitor.model == "conductor":
-            smallest = conductors.min_separation(capacitor.width, capacitor.height)
-            if capacitor.separation < smallest:
-                capacitor.separation = math.ceil(smallest / CM * 10) / 10 * CM  # the spin box shows 0.1 cm
-                self._clamped_to = capacitor.separation
-        self.scene.capacitor = capacitor
+        self.scene.capacitor = self.panel.capacitor(normal)
         self._update_conductor()
         self.refresh(animate=False)
 
-    # --- the conductor model ----------------------------------------------
+    # --- metallic spheres -------------------------------------------------
 
-    def _update_conductor(self) -> None:
-        """Give the scene the conductor solution of its capacitor, or start computing it."""
-        capacitor = self.scene.capacitor
+    def _sphere_dragged(self, index: int, position: np.ndarray, finished: bool) -> None:
+        if self.scene.planar:
+            position[2] = 0.0
+            self.sphere_handles.move(index, position)
+        sphere = self.scene.spheres[index]
+        sphere.center = position
+        self.panel.update_sphere(index, sphere)
+        self.view.move_sphere(index, position)
+        self.plotter.render()
+        if finished:
+            # its charges change once it is let go; not inside the widget's own release event,
+            # because refreshing rebuilds the handles, the widget among them
+            QtCore.QTimer.singleShot(0, self._sphere_released)
+
+    def _sphere_released(self) -> None:
+        if not self.closed:
+            self._update_conductor()
+            self.refresh(animate=False)
+
+    def _sphere_edited(self, row: int, voltage: float, radius: float, x: float, y: float, z: float) -> None:
+        sphere = self.scene.spheres[row]
+        sphere.voltage = voltage
+        sphere.radius = radius * CM
+        sphere.center = np.array([x, y, 0.0 if self.scene.planar else z]) * CM
+        self._update_conductor()
+        self.refresh(animate=False)
+
+    def add_sphere(self, position: np.ndarray) -> None:
+        if self.scene.planar:
+            position = np.array([position[0], position[1], 0.0])
+        center = np.clip(position, -VIEW_HALF, VIEW_HALF)
+        self.scene.spheres.append(Sphere(center, NEW_SPHERE["radius"], NEW_SPHERE["voltage"]))
+        self._update_conductor(grow=True)
+        self.refresh(animate=True)
+
+    def _add_sphere_from_panel(self) -> None:
+        self.add_sphere(np.random.default_rng().uniform(-0.6, 0.6, 3) * VIEW_HALF)
+
+    def _add_sphere_at_mouse(self) -> None:
         if not self.scene.uses_conductor:
-            self.scene.conductor = None
             return
-        grid = self._solutions.get(geometry_key(capacitor))
-        if grid is None:
-            self.scene.conductor = None
+        point = self._mouse_point(self.plotter.iren.interactor.GetEventPosition())
+        if point is not None:
+            self.add_sphere(point)
+
+    def _remove_sphere(self, row: int) -> None:
+        del self.scene.spheres[row]
+        self._update_conductor(grow=True)
+        self.refresh(animate=True)
+
+    # --- the conductors model ---------------------------------------------
+
+    def _update_conductor(self, grow: bool = False) -> None:
+        """Give the scene the charges of its conductors: at once if their geometry was solved, else soon.
+
+        grow: the lines grow again once solved (a new setup), instead of just being updated (an edit).
+        """
+        self._grow_after_solve = grow
+        scene = self.scene
+        scene.conductor = None
+        self._touching = False
+        if not scene.uses_conductor or (scene.capacitor is None and not scene.spheres):
+            return
+        if conductors.touching(scene.conductor_plates(), scene.spheres):
+            self._touching = True
+            return
+        solver = self._solvers.get(scene.geometry_key())
+        if solver is None:
             self._solve_timer.start()
-        else:
-            self.scene.conductor = ConductorSolution(grid, capacitor.voltage, capacitor.normal)
+        else:  # new potentials on a known geometry: a quick solve
+            scene.conductor = solver.solve(scene.voltages())
 
     def _start_solve(self) -> None:
-        if not self.scene.uses_conductor:
+        if not self._computing():
             return
-        key = geometry_key(self.scene.capacitor)
+        key = self.scene.geometry_key()
+        plates = self.scene.conductor_plates()
+        spheres = copy.deepcopy(self.scene.spheres)
         if self._solver_future is not None:
             self._solver_future.cancel()  # a solve for an older geometry that has not started yet
 
         def job():
             try:
-                grid = conductors.solve(*key)
+                solver = Solver(plates, spheres)
             except Exception:
                 traceback.print_exc()
-                grid = None
-            self.solver_worker.finished.emit(key, grid)
+                solver = None
+            self.solver_worker.finished.emit(key, solver)
 
         self._solver_future = self._solver.submit(job)
 
-    def _solved(self, key, grid) -> None:
-        if self.closed or grid is None:
+    def _solved(self, key, solver) -> None:
+        if self.closed or solver is None:
             return
-        self._solutions[key] = grid
-        while len(self._solutions) > KEPT_SOLUTIONS:
-            del self._solutions[next(iter(self._solutions))]  # the oldest
-        if self.scene.uses_conductor and geometry_key(self.scene.capacitor) == key:
+        self._solvers[key] = solver
+        while len(self._solvers) > KEPT_SOLVERS:
+            del self._solvers[next(iter(self._solvers))]  # the oldest
+        if self.scene.uses_conductor and self.scene.geometry_key() == key:
+            grow = self._grow_after_solve
             self._update_conductor()
-            self.refresh(animate=True)
+            self.refresh(animate=grow)
 
     def _update_readouts(self) -> None:
         values = self.scene.capacitor_readouts()
@@ -451,12 +547,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if values is not None:
             units = dict(E_center="V/m", E_ideal="V/m", dV="V", Q="C", C="F", C_ideal="F")
             texts = {f"readout_{name}": format_quantity(values[name], unit) for name, unit in units.items()}
-        status = []
-        if self.scene.uses_conductor and self.scene.conductor is None:
-            status.append(tr("computing"))
-        if self._clamped_to is not None:
-            status.append(tr("clamped", d=f"{self._clamped_to / CM:.1f}"))
-        self.panel.set_readouts(texts, " ".join(status))
+        status = tr("spheres_touch") if self._touching else tr("computing") if self._computing() else ""
+        self.panel.set_readouts(texts, status)
+        self.panel.set_sphere_charges(self._sphere_charges())
 
     def _views_edited(self) -> None:
         options = self.panel.view_options()
@@ -489,6 +582,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._executor.shutdown(wait=False, cancel_futures=True)
         self._solver.shutdown(wait=False, cancel_futures=True)
         self.handles.clear()
+        self.sphere_handles.clear()
         self.plotter.close()
         super().closeEvent(event)
 

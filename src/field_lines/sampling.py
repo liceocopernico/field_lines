@@ -13,6 +13,7 @@ from field_lines.scene import VIEW_HALF
 from field_lines.sources import AXES, FieldModel
 
 EQUIPOTENTIAL_RES_3D = 72  # grid points per side
+EQUIPOTENTIAL_RES_CONDUCTORS = 48  # in 3D in the conductors model, whose field is slower to evaluate (~1.5 s)
 EQUIPOTENTIAL_RES_2D = 241
 ARROWS_3D = 9
 ARROWS_2D = 17
@@ -74,10 +75,11 @@ def potential_levels(values: np.ndarray, count: int) -> np.ndarray:
 
 
 def equipotentials(
-    model: FieldModel, planar: bool, count: int, exclusions: Sequence[Exclusion]
+    model: FieldModel, planar: bool, count: int, exclusions: Sequence[Exclusion], resolution: int | None = None
 ) -> tuple[pv.PolyData, np.ndarray]:
-    """Equipotential surfaces (lines in 2D) and their potentials."""
-    grid = view_grid(EQUIPOTENTIAL_RES_2D if planar else EQUIPOTENTIAL_RES_3D, planar)
+    """Equipotential surfaces (lines in 2D) and their potentials; resolution: grid points per side."""
+    resolution = resolution or (EQUIPOTENTIAL_RES_2D if planar else EQUIPOTENTIAL_RES_3D)
+    grid = view_grid(resolution, planar)
     points = np.asarray(grid.points)
     V = evaluate_potential(model, points)
     grid.point_data["V"] = V

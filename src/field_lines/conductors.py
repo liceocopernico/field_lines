@@ -1,350 +1,400 @@
-"""Capacitor plates as conductors at fixed potentials: Laplace's equation on a grid.
+"""Conductors held at fixed potentials, alone in empty space: capacitor plates and metallic spheres.
 
-The plates are centred on the origin across their normal axis w, the positive
-one at w = +d/2. In local coordinates (u, v, w), as for sources.Plate, the
-potential is even in u and v and odd in w, so only the octant u, v, w >= 0 is
-solved:
+A conductor's charge sits on its surface. Each surface is cut into small flat
+panels, each with a uniform surface charge density, and the densities are
+chosen so that the centre of every panel is at its conductor's potential (the
+method of moments, or boundary elements). That solves Laplace's equation
+outside the conductors with V -> 0 far away, without a grid.
 
-- w = 0 is the plane halfway between the plates: V = 0 there;
-- u = 0 and v = 0 are mirror planes: no field crosses them;
-- the positive plate is a one-node-thick layer at V = +1/2 (for ΔV = 1 V);
-- the box around everything, BOX_MARGIN plate sides away, is held at the
-  potential that the plates' charges would make in empty space. Those
-  charges are not known in advance: the box starts at V = 0, and is updated
-  from the charges found a few times (OPEN_BOUNDARY_PASSES). So the capacitor
-  is alone in space, and outside the box its field is the field of those
-  charges, which is where field lines go when they loop far out.
+- A plate is a thin rectangle cut into PLATE_PANELS x PLATE_PANELS panels,
+  finer towards its edges, where the charge piles up. Its two faces are told
+  apart afterwards: each carries σ/2 plus or minus ε₀ times the field of all
+  the other panels across it.
+- A sphere is a cube projected onto it: 6 faces of SPHERE_PANELS x
+  SPHERE_PANELS panels.
 
-The grid is rectilinear: uniform and fine (spacing h) over the plate and the
-gap and a little beyond the edges, then growing geometrically towards the
-box, where nothing changes quickly. The Laplacian is written in finite
-volumes, as a sum over the grid's edges of (face area / edge length) times
-the squared difference of V; on the mirror planes the cells are half cells.
-The matrix is symmetric and is solved by conjugate gradients. The charge of
-a plate node is ε₀ (A V) there: ε₀ times the flux of E out of its cell.
+The potential or the field of a panel at a point is that of a uniformly
+charged rectangle when the point is within NEAR panel sizes, and that of a
+point charge farther away. The same rule builds the matrix of the solve and
+evaluates the field afterwards, so the potentials come out as asked.
 
-E = -∇V is taken on the nodes by central differences and interpolated, except
-in the cells next to a plate: there a central difference would mix the strong
-field on one side of the plate with the weak field on the other, so E is the
-gradient of V interpolated inside that cell, one-sided by construction.
+The matrix depends only on the geometry; its LU factors are kept in a
+Solver, and a new set of potentials is a quick Solver.solve(voltages).
+
+To evaluate the field at many points quickly, neighbouring panels are
+grouped into clusters: seen from farther than CLUSTER_NEAR cluster radii, a
+cluster is a point charge plus a dipole at its centre; nearer, its panels
+count one by one.
 """
 
-import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import sparse
-from scipy.interpolate import RegularGridInterpolator
-from scipy.sparse.linalg import cg
+from scipy.linalg import lu_factor, lu_solve
 
-from field_lines.sources import AXES
+from field_lines.sources import Plate, rectangle_field, rectangle_potential
 from field_lines.units import EPS0, K
 
-CELLS_IN_GAP = 10  # at least, across the whole gap
-CELLS_ON_SIDE = 40  # at least, across a whole plate side
-GROWTH = 1.12  # ratio of neighbouring cells outside the fine region
-BOX_MARGIN = 3.0  # plate sides between the plates and the box
-OPEN_BOUNDARY_PASSES = 1  # one update is enough: C then changes by less than 1e-5
-FAR_BLOCKS = 12  # outside the box the quarter plate's charges are merged into at most 12 x 12 blocks
-MAX_UNKNOWNS = 600_000  # about 10 s at most
-TOLERANCE = 1e-6  # C does not change in its first 5 digits from 1e-8
-
-
-def spacing(width: float, height: float, separation: float, refine: float = 1.0) -> float:
-    """The fine grid spacing h (refine > 1 makes it finer, for convergence checks)."""
-    return min(separation / CELLS_IN_GAP, max(width, height) / CELLS_ON_SIDE) / refine
-
-
-def axis_nodes(edge: float, fine_until: float, end: float, h: float) -> np.ndarray:
-    """Nodes from 0 to end: spacing near h with a node exactly on edge, up to fine_until, then growing."""
-    cells = max(1, math.ceil(edge / h))
-    step = edge / cells
-    nodes = list(np.arange(cells + 1) * step)
-    while nodes[-1] < fine_until:
-        nodes.append(nodes[-1] + step)
-    gap = step
-    while nodes[-1] < end:
-        gap *= GROWTH
-        nodes.append(min(nodes[-1] + gap, end) if end - nodes[-1] > 0.5 * gap else end)
-        if nodes[-1] == end:
-            break
-    return np.array(nodes)
-
-
-def grid_axes(width: float, height: float, separation: float, refine: float = 1.0):
-    h = spacing(width, height, separation, refine)
-    side = max(width, height)
-    end = separation / 2 + BOX_MARGIN * side
-    margin = max(separation, 4 * h)  # the fringe field near the edges needs the fine spacing too
-    u = axis_nodes(width / 2, width / 2 + margin, end, h)
-    v = axis_nodes(height / 2, height / 2 + margin, end, h)
-    w = axis_nodes(separation / 2, separation / 2 + margin, end, h)
-    return u, v, w
-
-
-def unknowns(width: float, height: float, separation: float) -> int:
-    return math.prod(len(a) for a in grid_axes(width, height, separation))
-
-
-def min_separation(width: float, height: float) -> float:
-    """The smallest gap whose grid fits in MAX_UNKNOWNS."""
-    lo, hi = 1e-4 * max(width, height), max(width, height)
-    for _ in range(30):
-        mid = (lo + hi) / 2
-        lo, hi = (mid, hi) if unknowns(width, height, mid) > MAX_UNKNOWNS else (lo, mid)
-    return hi
+PLATE_PANELS = 25  # per side of a plate; odd, so that a row of panels lies on each centre line
+SPHERE_PANELS = 8  # per edge of each of the six faces of the cube
+NEAR = 4.0  # closer than this many panel sizes, a panel is a rectangle, not a point charge
+CHUNK = 1000  # points per block of point-panel pairs
+PLATE_BLOCK = 5  # a plate's clusters are blocks of 5 x 5 panels
+SPHERE_BLOCK = 4  # a sphere's are blocks of 4 x 4 panels on each face of the cube
+CLUSTER_NEAR = 4.0  # farther than this many cluster radii, a cluster is a charge and a dipole
 
 
 @dataclass
-class OctantGrid:
-    """The solution for ΔV = 1 V in the octant: V and E on the nodes, and the plate's charge."""
-
-    width: float
-    height: float
-    separation: float
-    spacing: float  # the fine spacing h
-    axes: tuple[np.ndarray, np.ndarray, np.ndarray]  # node coordinates along u, v, w
-    values: np.ndarray  # (nu, nv, nw, 4): V, Eu, Ev, Ew
-    capacitance: float  # F
-    sigma: np.ndarray  # charge density on the plate nodes of a quarter plate, C/m² for 1 V
-    sigma_faces: np.ndarray  # (2, ...) the same split into the inner face (towards the gap) and the outer face
-    plate_nodes: tuple[int, int, int]  # (ip, jp, kp): the plate's edge nodes along u and v, its layer along w
-    charge_positions: np.ndarray  # (n, 3) local positions of the node charges of both whole plates
-    charges: np.ndarray  # (n,) their charges for 1 V, C
+class Sphere:
+    center: np.ndarray  # m
+    radius: float  # m
+    voltage: float = 0.0  # V, with respect to infinity
 
     def __post_init__(self):
-        self.interpolator = RegularGridInterpolator(self.axes, self.values, bounds_error=False, fill_value=0.0)
-        u, v, w = self.axes
-        ip, jp, kp = self.plate_nodes
-        self._near_plate = (u[ip + 1], v[jp + 1], w[kp - 1], w[kp + 1])
-
-    def evaluate(self, points: np.ndarray) -> np.ndarray:
-        """V, Eu, Ev, Ew for 1 V at octant points (u, v, w >= 0)."""
-        values = self.interpolator(points)
-        u_max, v_max, w_lo, w_hi = self._near_plate
-        u, v, w = points.T
-        near = (u < u_max) & (v < v_max) & (w > w_lo) & (w < w_hi)
-        if near.any():
-            values[near, 1:] = -_cell_gradient(self.axes, self.values[..., 0], points[near])
-        values[u == 0, 1] = 0.0  # no field across the mirror planes, by symmetry
-        values[v == 0, 2] = 0.0
-        return values
+        self.center = np.asarray(self.center, dtype=float)
 
 
-def solve(width: float, height: float, separation: float, refine: float = 1.0) -> OctantGrid:
-    axes = grid_axes(width, height, separation, refine)
-    shape = tuple(len(a) for a in axes)
-    if math.prod(shape) > MAX_UNKNOWNS * refine**3:
-        minimum = min_separation(width, height)
-        raise ValueError(f"separation {separation} m needs too fine a grid (minimum {minimum:.4g} m)")
-    u, v, w = axes
-    ip = int(np.searchsorted(u, width / 2 - 1e-12))
-    jp = int(np.searchsorted(v, height / 2 - 1e-12))
-    kp = int(np.searchsorted(w, separation / 2 - 1e-12))
+@dataclass
+class Panels:
+    centers: np.ndarray  # (N, 3)
+    frames: np.ndarray  # (N, 3, 3): rows e_u, e_v and the normal n
+    half_u: np.ndarray  # (N,) half sides along e_u and e_v
+    half_v: np.ndarray
+    owner: np.ndarray  # (N,) index of the conductor the panel belongs to
 
-    A = _laplacian(axes)
-    box = np.zeros(shape, dtype=bool)
-    box[-1, :, :] = box[:, -1, :] = box[:, :, -1] = True
-    box[:, :, 0] = False  # the midplane stays at V = 0
-    fixed = box.copy()
-    fixed[:, :, 0] = True
-    fixed[: ip + 1, : jp + 1, kp] = True
-    V = np.zeros(shape)
-    V[: ip + 1, : jp + 1, kp] = 0.5
-    free = ~fixed.ravel()
-    A_free = A[free][:, free].tocsr()
-    A_fixed = A[free][:, ~free].tocsr()
-    jacobi = sparse.diags(1 / A_free.diagonal())
-    box_points = np.stack(np.meshgrid(u, v, w, indexing="ij"), axis=-1)[box]
-    x = None
-    for passes_left in range(OPEN_BOUNDARY_PASSES, -1, -1):
-        rhs = -(A_fixed @ V.ravel()[~free])
-        x, info = cg(A_free, rhs, x0=x, rtol=TOLERANCE, maxiter=10 * sum(shape), M=jacobi)
-        if info != 0:
-            raise RuntimeError(f"the Laplace solver did not converge (cg info {info})")
-        V.ravel()[free] = x
-        node_charge = EPS0 * (A @ V.ravel()).reshape(shape)[: ip + 1, : jp + 1, kp]
-        positions, charges = _whole_plates(*_blocks(u[: ip + 1], v[: jp + 1], node_charge), w[kp])
-        if passes_left:
-            V[box] = potential_of_charges(box_points, positions, charges)
+    @property
+    def area(self) -> np.ndarray:
+        return 4 * self.half_u * self.half_v
 
-    charge = 4 * node_charge.sum()  # the octant holds a quarter of the positive plate
-    cell_u, cell_v = _cell_widths(u)[: ip + 1], _cell_widths(v)[: jp + 1]
-    sigma = node_charge / np.outer(cell_u, cell_v)
-    # each face's share: ε₀ times the flux of E through that face of the node's cell, per area
-    # (sigma also counts the flux out of the plate's rim at the edge nodes)
-    plate = V[: ip + 1, : jp + 1, kp]
-    inner = EPS0 * (plate - V[: ip + 1, : jp + 1, kp - 1]) / (w[kp] - w[kp - 1])
-    outer = EPS0 * (plate - V[: ip + 1, : jp + 1, kp + 1]) / (w[kp + 1] - w[kp])
+    @property
+    def size(self) -> np.ndarray:
+        return 2 * np.maximum(self.half_u, self.half_v)
 
-    Eu, Ev, Ew = (-g for g in np.gradient(V, u, v, w))
-    Eu[0], Ev[:, 0] = 0.0, 0.0  # exactly, by symmetry (np.gradient is one-sided there)
-    values = np.stack((V, Eu, Ev, Ew), axis=-1)
-    h = spacing(width, height, separation, refine)
-    return OctantGrid(
-        width,
-        height,
-        separation,
-        h,
-        axes,
-        values,
-        capacitance=charge,
-        sigma=sigma,
-        sigma_faces=np.stack((inner, outer)),
-        plate_nodes=(ip, jp, kp),
-        charge_positions=positions,
-        charges=charges,
+    def __len__(self) -> int:
+        return len(self.centers)
+
+
+def _join(parts: Sequence[Panels]) -> Panels:
+    fields = ("centers", "frames", "half_u", "half_v", "owner")
+    return Panels(*(np.concatenate([getattr(p, f) for p in parts]) for f in fields))
+
+
+def panel_edges(half: float, n: int) -> np.ndarray:
+    """n + 1 edges from -half to half, closer together towards the ends (cosine spacing)."""
+    return -half * np.cos(np.linspace(0.0, np.pi, n + 1))
+
+
+def plate_face_grid(plate: Plate, n: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The panel centres of a plate along its u and v, as plate_panels lays them out."""
+    n = n or PLATE_PANELS
+    eu, ev = panel_edges(plate.width / 2, n), panel_edges(plate.height / 2, n)
+    return (eu[1:] + eu[:-1]) / 2, (ev[1:] + ev[:-1]) / 2
+
+
+def plate_panels(plate: Plate, owner: int, n: int | None = None) -> Panels:
+    n = n or PLATE_PANELS
+    eu, ev = panel_edges(plate.width / 2, n), panel_edges(plate.height / 2, n)
+    cu, cv = plate_face_grid(plate, n)
+    uu, vv = np.meshgrid(cu, cv, indexing="ij")
+    local = np.column_stack((uu.ravel(), vv.ravel(), np.zeros(uu.size)))
+    axes = plate.from_local(np.eye(3))  # rows: the global directions of local u, v, w
+    hu, hv = np.meshgrid(np.diff(eu) / 2, np.diff(ev) / 2, indexing="ij")
+    return Panels(
+        plate.from_local(local) + plate.center,
+        np.repeat(axes[None], uu.size, axis=0),
+        hu.ravel(),
+        hv.ravel(),
+        np.full(uu.size, owner),
     )
 
 
-def _blocks(u: np.ndarray, v: np.ndarray, node_charge: np.ndarray):
-    """The quarter plate's node charges merged into at most FAR_BLOCKS x FAR_BLOCKS blocks.
+def sphere_mesh(center: np.ndarray, radius: float, m: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Corner points (6 (m+1)², 3) and quads (6 m², 4) of a cube projected onto the sphere.
 
-    Each block's charge sits at the block's centre of charge, which keeps its
-    charge and its dipole moment: seen from the box, three plate sides away,
-    that is all that matters.
+    The cube's faces are divided at equal angles, so the panels are nearly
+    equal. The quads go face by face in the order of sphere_panels.
     """
-    bu, bv, q = [], [], []
-    for rows in np.array_split(np.arange(len(u)), min(FAR_BLOCKS, len(u))):
-        for cols in np.array_split(np.arange(len(v)), min(FAR_BLOCKS, len(v))):
-            block = node_charge[np.ix_(rows, cols)]
-            total = block.sum()
-            bu.append((block.sum(axis=1) @ u[rows]) / total)
-            bv.append((block.sum(axis=0) @ v[cols]) / total)
-            q.append(total)
-    return np.array(bu), np.array(bv), np.array(q)
+    m = m or SPHERE_PANELS
+    t = np.tan(np.linspace(-np.pi / 4, np.pi / 4, m + 1))
+    s1, s2 = np.meshgrid(t, t, indexing="ij")
+    one = np.ones_like(s1)
+    points, quads = [], []
+    for axis in range(3):
+        for sign in (1.0, -1.0):
+            cube = [None, None, None]
+            cube[axis] = sign * one
+            first, second = [k for k in range(3) if k != axis]
+            # every face's quads turn the same way seen from outside
+            cube[first], cube[second] = (s1, s2) if sign > 0 else (s2, s1)
+            p = np.stack(cube, axis=-1).reshape(-1, 3)
+            start = len(points) * (m + 1) ** 2
+            points.append(center + radius * p / np.linalg.norm(p, axis=1, keepdims=True))
+            i, j = np.meshgrid(np.arange(m), np.arange(m), indexing="ij")
+            corner = start + i * (m + 1) + j
+            quads.append(np.stack((corner, corner + m + 1, corner + m + 2, corner + 1), axis=-1).reshape(-1, 4))
+    return np.concatenate(points), np.concatenate(quads)
 
 
-def _whole_plates(u: np.ndarray, v: np.ndarray, charge: np.ndarray, w_plate: float):
-    """Charges of a quarter plate at (u, v), mirrored into both whole plates (the - plate with -q).
+def sphere_panels(sphere: Sphere, owner: int, m: int | None = None) -> Panels:
+    points, quads = sphere_mesh(sphere.center, sphere.radius, m)
+    corners = points[quads]  # (n, 4, 3)
+    normal = corners.mean(axis=1) - sphere.center
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    e_u = corners[:, 1] - corners[:, 0]
+    e_u -= np.einsum("ij,ij->i", e_u, normal)[:, None] * normal
+    e_u /= np.linalg.norm(e_u, axis=1, keepdims=True)
+    e_v = np.cross(normal, e_u)
+    flat = 0.5 * np.linalg.norm(np.cross(corners[:, 2] - corners[:, 0], corners[:, 3] - corners[:, 1]), axis=1)
+    area = flat * 4 * np.pi * sphere.radius**2 / flat.sum()  # the whole sphere, shared as the flat quads share it
+    half = np.sqrt(area) / 2  # each panel a square of its area
+    return Panels(
+        sphere.center + sphere.radius * normal,
+        np.stack((e_u, e_v, normal), axis=1),
+        half,
+        half.copy(),
+        np.full(len(quads), owner),
+    )
 
-    A charge on a mirror plane is the octant's share of its cell, so its two
-    mirror images together make the whole charge.
+
+def _local(rel: np.ndarray, frames: np.ndarray) -> np.ndarray:
+    return np.einsum("pk,pak->pa", rel, frames)
+
+
+def _near_pairs(d: np.ndarray, size: np.ndarray):
+    return np.nonzero(d < NEAR * size[None, :])
+
+
+def interaction_matrix(panels: Panels) -> np.ndarray:
+    """A[i, j]: potential at the centre of panel i from panel j with σ = 1 C/m²."""
+    n = len(panels)
+    A = np.empty((n, n))
+    for start in range(0, n, CHUNK):
+        rel = panels.centers[start : start + CHUNK, None, :] - panels.centers[None, :, :]
+        d = np.linalg.norm(rel, axis=2)
+        with np.errstate(divide="ignore"):
+            block = K * panels.area[None, :] / d
+        i, j = _near_pairs(d, panels.size)
+        local = _local(rel[i, j], panels.frames[j])
+        block[i, j] = K * rectangle_potential(local[:, 0], local[:, 1], local[:, 2], panels.half_u[j], panels.half_v[j])
+        A[start : start + CHUNK] = block
+    return A
+
+
+@dataclass
+class Clusters:
+    members: np.ndarray  # (C, most) panel indices, -1 where a cluster has fewer
+    centers: np.ndarray  # (C, 3)
+    radius: np.ndarray  # (C,) reach of the cluster's panels from its centre
+
+
+def make_clusters(panels: Panels, groups: Sequence[np.ndarray]) -> Clusters:
+    most = max(len(g) for g in groups)
+    members = np.full((len(groups), most), -1)
+    for c, g in enumerate(groups):
+        members[c, : len(g)] = g
+    centers = np.array([panels.centers[g].mean(axis=0) for g in groups])
+    radius = np.array(
+        [(np.linalg.norm(panels.centers[g] - centers[c], axis=1) + panels.size[g]).max() for c, g in enumerate(groups)]
+    )
+    return Clusters(members, centers, radius)
+
+
+def _blocks(first: int, rows: int, cols: int, block: int) -> list[np.ndarray]:
+    """Indices of a rows x cols panel grid (row-major from first), in blocks of block x block."""
+    index = first + np.arange(rows * cols).reshape(rows, cols)
+    return [index[r : r + block, c : c + block].ravel() for r in range(0, rows, block) for c in range(0, cols, block)]
+
+
+def _accumulate(out: np.ndarray, index: np.ndarray, values: np.ndarray) -> None:
+    if out.ndim == 1:
+        out += np.bincount(index, weights=values, minlength=len(out))
+    else:
+        for k in range(out.shape[1]):
+            out[:, k] += np.bincount(index, weights=values[:, k], minlength=len(out))
+
+
+def _panel_terms(panels: Panels, sigma: np.ndarray, rel: np.ndarray, j: np.ndarray, field: bool, potential: bool):
+    """V and E of panels j at offsets rel from their centres: rectangles if near, point charges if not.
+
+    Never both for the same pair: a point charge's huge term right next to its
+    panel would not cancel exactly.
     """
-    positions, charges = [], []
-    for su in (1, -1):
-        for sv in (1, -1):
-            for sw in (1, -1):
-                positions.append(np.column_stack((su * u, sv * v, np.full(len(u), sw * w_plate))))
-                charges.append(sw * charge)
-    return np.concatenate(positions), np.concatenate(charges)
+    d = np.linalg.norm(rel, axis=1)
+    near = d < NEAR * panels.size[j]
+    q = sigma[j] * panels.area[j]
+    inv = np.where(near, 0.0, 1.0 / np.where(near, 1.0, d))
+    jn = j[near]
+    local = _local(rel[near], panels.frames[jn])
+    args = (local[:, 0], local[:, 1], local[:, 2], panels.half_u[jn], panels.half_v[jn])
+    V = E = None
+    if potential:
+        V = q * inv
+        V[near] = sigma[jn] * rectangle_potential(*args)
+    if field:
+        E = (q * inv**3)[:, None] * rel
+        E[near] = np.einsum("pa,pak->pk", rectangle_field(*args), panels.frames[jn]) * sigma[jn][:, None]
+    return V, E
 
 
-def potential_of_charges(points: np.ndarray, positions: np.ndarray, charges: np.ndarray) -> np.ndarray:
-    """V of point charges in empty space, in chunks of points to bound memory."""
-    V = np.empty(len(points))
-    for start in range(0, len(points), 256):
-        r = points[start : start + 256, None, :] - positions[None, :, :]
-        V[start : start + 256] = K * (charges / np.linalg.norm(r, axis=2)).sum(axis=1)
-    return V
+def evaluate(
+    panels: Panels,
+    sigma: np.ndarray,
+    points: np.ndarray,
+    field: bool = True,
+    potential: bool = True,
+    clusters: Clusters | None = None,
+):
+    """V (M,) and E (M, 3) of the charged panels at the points; None for what is not asked.
+
+    Without clusters every panel counts one by one (slow, exact up to NEAR).
+    """
+    m = len(points)
+    V = np.zeros(m) if potential else None
+    E = np.zeros((m, 3)) if field else None
+    if clusters is None:
+        groups = Clusters(np.arange(len(panels))[None, :], np.zeros((1, 3)), np.array([np.inf]))
+    else:
+        groups = clusters
+    q = sigma * panels.area
+    valid = groups.members >= 0
+    safe = np.where(valid, groups.members, 0)
+    charge = (q[safe] * valid).sum(axis=1)
+    dipole = np.einsum("cm,cmk->ck", q[safe] * valid, panels.centers[safe] - groups.centers[:, None, :])
+    for start in range(0, m, CHUNK):
+        p = points[start : start + CHUNK]
+        n = len(p)
+        rel = p[:, None, :] - groups.centers[None, :, :]
+        d = np.linalg.norm(rel, axis=2)
+        near = d < CLUSTER_NEAR * groups.radius[None, :]
+        # far clusters: a point charge and a dipole at the centre
+        inv = np.where(near, 0.0, 1.0 / np.where(near, 1.0, d))
+        p_dot_r = np.einsum("nck,ck->nc", rel, dipole)
+        if potential:
+            V[start : start + n] = K * (charge * inv + p_dot_r * inv**3).sum(axis=1)
+        if field:
+            E[start : start + n] = K * (
+                np.einsum("nc,nck->nk", charge * inv**3 + 3 * p_dot_r * inv**5, rel) - (inv**3) @ dipole
+            )
+        # near clusters: their panels one by one
+        point, cluster = np.nonzero(near)
+        if point.size == 0:
+            continue
+        j = groups.members[cluster]
+        keep = j >= 0
+        point = np.broadcast_to(point[:, None], j.shape)[keep]
+        j = j[keep]
+        v, e = _panel_terms(panels, sigma, p[point] - panels.centers[j], j, field, potential)
+        if potential:
+            _accumulate(V[start : start + n], point, K * v)
+        if field:
+            _accumulate(E[start : start + n], point, K * e)
+    return V, E
 
 
-def field_of_charges(points: np.ndarray, positions: np.ndarray, charges: np.ndarray) -> np.ndarray:
-    E = np.empty((len(points), 3))
-    for start in range(0, len(points), 256):
-        r = points[start : start + 256, None, :] - positions[None, :, :]
-        d = np.linalg.norm(r, axis=2)
-        E[start : start + 256] = K * np.einsum("mn,mnk->mk", charges / d**3, r)
-    return E
+class Solver:
+    """The panels of a set of conductors, with the LU factors of their interaction matrix.
 
+    Conductors are numbered plates first, then spheres.
+    """
 
-def _cell_gradient(axes, V: np.ndarray, points: np.ndarray) -> np.ndarray:
-    """∇ of the trilinear interpolation of V, inside the cell that holds each point."""
-    index, t, size = [], [], []
-    for axis, x in enumerate(axes):
-        i = np.clip(np.searchsorted(x, points[:, axis]) - 1, 0, len(x) - 2)
-        dx = x[i + 1] - x[i]
-        index.append(i)
-        t.append(np.clip((points[:, axis] - x[i]) / dx, 0.0, 1.0))
-        size.append(dx)
-    i, j, k = index
+    def __init__(self, plates: Sequence[Plate], spheres: Sequence[Sphere]):
+        self.plates = list(plates)
+        self.spheres = list(spheres)
+        parts = [plate_panels(plate, k) for k, plate in enumerate(self.plates)]
+        parts += [sphere_panels(sphere, len(self.plates) + k) for k, sphere in enumerate(self.spheres)]
+        self.panels = _join(parts)
+        self.lu = lu_factor(interaction_matrix(self.panels), check_finite=False)
+        groups = []
+        first = 0
+        for _ in self.plates:
+            groups += _blocks(first, PLATE_PANELS, PLATE_PANELS, PLATE_BLOCK)
+            first += PLATE_PANELS**2
+        for _ in self.spheres:
+            for _face in range(6):
+                groups += _blocks(first, SPHERE_PANELS, SPHERE_PANELS, SPHERE_BLOCK)
+                first += SPHERE_PANELS**2
+        self.clusters = make_clusters(self.panels, groups)
 
-    def corner(a, b, c):
-        return V[i + a, j + b, k + c]
-
-    tu, tv, tw = t
-    grad = np.empty((len(points), 3))
-    # along u: the difference across the cell, blended over v and w; likewise for v and w
-    grad[:, 0] = sum(
-        (corner(1, b, c) - corner(0, b, c)) * (tv if b else 1 - tv) * (tw if c else 1 - tw) for b in (0, 1) for c in (0, 1)
-    ) / size[0]
-    grad[:, 1] = sum(
-        (corner(a, 1, c) - corner(a, 0, c)) * (tu if a else 1 - tu) * (tw if c else 1 - tw) for a in (0, 1) for c in (0, 1)
-    ) / size[1]
-    grad[:, 2] = sum(
-        (corner(a, b, 1) - corner(a, b, 0)) * (tu if a else 1 - tu) * (tv if b else 1 - tv) for a in (0, 1) for b in (0, 1)
-    ) / size[2]
-    return grad
-
-
-def _cell_widths(x: np.ndarray) -> np.ndarray:
-    """Width of each node's cell: half the edges on both sides (a half cell at the ends)."""
-    edges = np.diff(x)
-    return np.concatenate(([edges[0] / 2], (edges[:-1] + edges[1:]) / 2, [edges[-1] / 2]))
-
-
-def _laplacian(axes) -> sparse.csr_matrix:
-    """Σ over edges of (face area / length) (x_a - x_b)², on the rectilinear grid."""
-    ops, cells = [], []
-    for x in axes:
-        n = len(x)
-        D = sparse.diags([-np.ones(n - 1), np.ones(n - 1)], [0, 1], shape=(n - 1, n))
-        ops.append((D.T @ sparse.diags(1 / np.diff(x)) @ D).tocsr())
-        cells.append(sparse.diags(_cell_widths(x)))
-    (Lu, Lv, Lw), (Cu, Cv, Cw) = ops, cells
-    kron = sparse.kron
-    return (kron(kron(Lu, Cv), Cw) + kron(kron(Cu, Lv), Cw) + kron(kron(Cu, Cv), Lw)).tocsr()
+    def solve(self, voltages: Sequence[float]) -> "ConductorSolution":
+        """The charges for the conductors at these potentials (one per conductor, plates first)."""
+        voltages = np.asarray(voltages, dtype=float)
+        sigma = lu_solve(self.lu, voltages[self.panels.owner], check_finite=False)
+        return ConductorSolution(self, sigma, voltages)
 
 
 class ConductorSolution:
-    """The capacitor's field at a given ΔV and orientation, from the octant solution."""
+    """The charge on every panel, and the field it makes everywhere."""
 
-    def __init__(self, grid: OctantGrid, voltage: float, normal: str = "z"):
-        self.grid = grid
-        self.voltage = voltage
-        self.normal = normal
-        a = AXES.index(normal)
-        self.local_axes = [(a + 1) % 3, (a + 2) % 3, a]
-
-    @property
-    def spacing(self) -> float:
-        return self.grid.spacing
-
-    @property
-    def capacitance(self) -> float:
-        return self.grid.capacitance
-
-    @property
-    def charge(self) -> float:
-        """Charge of the positive plate (the plate at +d/2 along the normal), C."""
-        return self.grid.capacitance * self.voltage
-
-    def _split(self, points: np.ndarray):
-        """Local coordinates, and which points lie outside the grid's box (there: the plates' charges)."""
-        local = points[:, self.local_axes]
-        box_end = np.array([axis[-1] for axis in self.grid.axes])
-        return local, np.any(np.abs(local) > box_end, axis=1)
-
-    def potential(self, points: np.ndarray) -> np.ndarray:
-        local, outside = self._split(points)
-        V = np.empty(len(points))
-        inside = ~outside
-        octant, sw = np.abs(local[inside]), np.where(local[inside, 2] < 0, -1.0, 1.0)
-        V[inside] = sw * self.grid.interpolator(octant)[:, 0]
-        V[outside] = potential_of_charges(local[outside], self.grid.charge_positions, self.grid.charges)
-        return V * self.voltage
+    def __init__(self, solver: Solver, sigma: np.ndarray, voltages: np.ndarray):
+        self.solver = solver
+        self.panels = solver.panels
+        self.sigma = sigma
+        self.voltages = voltages
+        self.faces = self._plate_faces()
 
     def field(self, points: np.ndarray) -> np.ndarray:
-        local, outside = self._split(points)
-        E = np.empty_like(local)
-        inside = ~outside
-        octant = np.abs(local[inside])
-        su, sv, sw = np.where(local[inside] < 0, -1.0, 1.0).T
-        values = self.grid.evaluate(octant)
-        E[inside] = np.column_stack((sw * su * values[:, 1], sw * sv * values[:, 2], values[:, 3]))
-        E[outside] = field_of_charges(local[outside], self.grid.charge_positions, self.grid.charges)
-        E[local[:, 0] == 0, 0] = 0.0  # no field across the mirror planes, by symmetry
-        E[local[:, 1] == 0, 1] = 0.0
-        out = np.empty_like(E)
-        out[:, self.local_axes] = E * self.voltage
-        return out
+        return evaluate(self.panels, self.sigma, points, potential=False, clusters=self.solver.clusters)[1]
+
+    def potential(self, points: np.ndarray) -> np.ndarray:
+        return evaluate(self.panels, self.sigma, points, field=False, clusters=self.solver.clusters)[0]
+
+    def charge(self, conductor: int) -> float:
+        """Total charge of a conductor, C."""
+        mine = self.panels.owner == conductor
+        return float((self.sigma[mine] * self.panels.area[mine]).sum())
+
+    def signed_charge(self, conductor: int, sign: int) -> float:
+        """The charge of a conductor's positive (sign +1) or negative (-1) parts, as a positive number."""
+        mine = self.panels.owner == conductor
+        area = self.panels.area[mine]
+        if conductor < len(self.solver.plates):
+            inner, outer = self.faces[conductor]
+            densities = np.concatenate((inner.ravel(), outer.ravel()))
+            area = np.concatenate((area, area))
+        else:
+            densities = self.sigma[mine]
+        return float((np.maximum(sign * densities, 0.0) * area).sum())
+
+    def sphere_sigma(self, k: int) -> np.ndarray:
+        """σ on the panels of sphere k, in the order of sphere_mesh's quads."""
+        return self.sigma[self.panels.owner == len(self.solver.plates) + k]
+
+    def _plate_faces(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        """σ on each plate's inner face (towards the origin, where the other plate is) and outer face.
+
+        Each face carries σ/2 ± ε₀ E·n, with E the field at the panel's centre:
+        a panel's own field has no component across it there.
+        """
+        faces = []
+        for k, plate in enumerate(self.solver.plates):
+            mine = np.flatnonzero(self.panels.owner == k)
+            normal = self.panels.frames[mine[0], 2]
+            inward = -normal if plate.center @ normal > 0 else normal
+            across = EPS0 * self.field(self.panels.centers[mine]) @ inward
+            half = self.sigma[mine] / 2
+            shape = (PLATE_PANELS, PLATE_PANELS)
+            faces.append(((half + across).reshape(shape), (half - across).reshape(shape)))
+        return faces
+
+
+def geometry_key(plates: Sequence[Plate], spheres: Sequence[Sphere]) -> tuple:
+    """What the interaction matrix depends on (not the potentials)."""
+    return (
+        tuple((tuple(np.round(p.center, 9)), round(p.width, 9), round(p.height, 9), p.normal) for p in plates),
+        tuple((tuple(np.round(s.center, 9)), round(s.radius, 9)) for s in spheres),
+    )
+
+
+def touching(plates: Sequence[Plate], spheres: Sequence[Sphere], gap: float = 1e-3) -> bool:
+    """Whether a sphere comes within gap of another sphere or of a plate."""
+    for a, s in enumerate(spheres):
+        for t in spheres[a + 1 :]:
+            if np.linalg.norm(s.center - t.center) < s.radius + t.radius + gap:
+                return True
+        for plate in plates:
+            local = plate.to_local(s.center[None])[0]
+            half = np.array([plate.width / 2, plate.height / 2, 0.0])
+            if np.linalg.norm(local - np.clip(local, -half, half)) < s.radius + gap:
+                return True
+    return False

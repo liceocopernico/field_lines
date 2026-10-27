@@ -15,8 +15,11 @@ from field_lines.view import sign_color
 CLICK_TOLERANCE = 4  # pixels the mouse may move between press and release for a click
 
 
+HANDLE_OPACITY = 0.02  # a metallic sphere's handle hardly shows over its coloured surface (0 cannot be picked)
+
+
 class ChargeHandles:
-    """One draggable sphere per point charge; on_move(index, position, finished) reports drags."""
+    """Draggable spheres (point charges or metallic spheres); on_move(index, position, finished) reports drags."""
 
     def __init__(self, plotter: pv.Plotter, on_move: Callable[[int, np.ndarray, bool], None]):
         self.pl = plotter
@@ -24,8 +27,17 @@ class ChargeHandles:
         self.widgets: list[vtkSphereWidget] = []
 
     def set_charges(self, charges: Sequence[PointCharge], enabled: bool = True) -> None:
+        items = [(c.position, charge_radius(c.q), sign_color(c.q), 1.0) for c in charges]
+        self.set_items(items, enabled)
+
+    def set_spheres(self, spheres: Sequence, enabled: bool = True) -> None:
+        """Handles for metallic spheres: their own size, nearly invisible over the surface showing σ."""
+        self.set_items([(s.center, s.radius, (0.6, 0.6, 0.6), HANDLE_OPACITY) for s in spheres], enabled)
+
+    def set_items(self, items: Sequence[tuple[np.ndarray, float, tuple, float]], enabled: bool = True) -> None:
+        """One handle per (centre, radius, colour, opacity)."""
         self.clear()
-        for index, charge in enumerate(charges):
+        for index, (center, radius, color, opacity) in enumerate(items):
             widget = vtkSphereWidget()
             widget.SetInteractor(self.pl.iren.interactor)
             widget.SetCurrentRenderer(self.pl.renderer)
@@ -33,11 +45,12 @@ class ChargeHandles:
             widget.SetThetaResolution(32)
             widget.SetPhiResolution(24)
             widget.ScaleOff()  # the right button would resize the sphere
-            color = sign_color(charge.q)
             widget.GetSphereProperty().SetColor(color)
+            widget.GetSphereProperty().SetOpacity(opacity)
             widget.GetSelectedSphereProperty().SetColor(tuple(0.5 + 0.5 * c for c in color))
-            widget.SetRadius(charge_radius(charge.q))
-            widget.SetCenter(*charge.position)
+            widget.GetSelectedSphereProperty().SetOpacity(opacity)
+            widget.SetRadius(radius)
+            widget.SetCenter(*center)
             widget.AddObserver("InteractionEvent", self._callback(index, finished=False))
             widget.AddObserver("EndInteractionEvent", self._callback(index, finished=True))
             if enabled:
@@ -104,11 +117,16 @@ def to_display(plotter: pv.Plotter, point: np.ndarray) -> np.ndarray:
 
 def charge_under_mouse(plotter: pv.Plotter, charges: Sequence[PointCharge], display) -> int | None:
     """Index of the charge drawn under the display position, the nearest one if several."""
+    return ball_under_mouse(plotter, [(c.position, charge_radius(c.q)) for c in charges], display)
+
+
+def ball_under_mouse(plotter: pv.Plotter, balls: Sequence[tuple[np.ndarray, float]], display) -> int | None:
+    """Index of the ball (centre, radius) drawn under the display position, the nearest one if several."""
     up = np.array(plotter.camera.up)
     best, best_distance = None, np.inf
-    for index, charge in enumerate(charges):
-        centre = to_display(plotter, charge.position)
-        edge = to_display(plotter, charge.position + charge_radius(charge.q) * up)
+    for index, (position, radius) in enumerate(balls):
+        centre = to_display(plotter, position)
+        edge = to_display(plotter, position + radius * up)
         distance = np.linalg.norm(centre - np.asarray(display))
         if distance <= max(np.linalg.norm(edge - centre), 6.0) and distance < best_distance:
             best, best_distance = index, distance

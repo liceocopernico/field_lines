@@ -10,7 +10,9 @@ hundred steps. A line stops when it
 - comes within r_stop of a point charge ("sink"),
 - crosses a plate whose charge has the opposite sign, or comes within
   plate_margin of it ("plate"); near a charged sheet the field flips, and a
-  step across it would stall,
+  step across it would stall. With plates_absorb every plate stops lines
+  (they are conductors, ending the lines that reach them),
+- comes within plate_margin of a metallic sphere ("sphere"),
 - turns back on itself, finds no field or stops advancing: it reached a null point ("null"),
 - leaves the bounding box ("bounds") or gets longer than max_length ("length").
 """
@@ -50,6 +52,8 @@ def trace(
     max_length: float,
     charges: Sequence[PointCharge] = (),
     plates: Sequence[Plate] = (),
+    plates_absorb: bool = False,
+    spheres: Sequence = (),
     plate_margin: float | None = None,
     step_far: float = 0.0,
     max_steps: int = 3000,
@@ -102,9 +106,15 @@ def trace(
         stop[np.any((p_new < lo) | (p_new > hi), axis=1)] = "bounds"
         stop[s[idx] + seg >= max_length] = "length"
         for plate in plates:
-            hit, arrival = _plate_hit(plate, p, p_new, sg, margin)
+            hit, arrival = _plate_hit(plate, p, p_new, sg, margin, plates_absorb)
             p_new[hit] = arrival[hit]
             stop[hit] = "plate"
+        for sphere in spheres:
+            out = p_new - sphere.center
+            d = np.linalg.norm(out, axis=1)
+            hit = d < sphere.radius + margin
+            p_new[hit] = sphere.center + sphere.radius * out[hit] / d[hit, None]
+            stop[hit] = "sphere"
         stop[_nearest_charge(p_new, charge_pos) < r_stop] = "sink"
 
         s[idx] += np.linalg.norm(p_new - p, axis=1)
@@ -152,8 +162,8 @@ def _adaptive_rk4(model, p, k1, h, sign, step_min):
     return p_new
 
 
-def _plate_hit(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray, margin: float):
-    """Which steps reach a plate that is a sink for their line, and the point where they end on it.
+def _plate_hit(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray, margin: float, absorb: bool):
+    """Which steps reach a plate that is a sink for their line (any plate, if absorb), and where they end.
 
     A step reaches the plate if it crosses it, or ends within margin of it
     (then the line ends at the nearest point of the plate).
@@ -165,7 +175,7 @@ def _plate_hit(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray,
         t = np.where(wa != wb, wa / (wa - wb), 0.0)
     c = a + t[:, None] * (b - a)
     half = np.array([plate.width / 2, plate.height / 2])
-    sink = plate.sigma * sign < 0
+    sink = np.ones(len(p), dtype=bool) if absorb else plate.sigma * sign < 0
     crossed = sink & (wa * wb <= 0) & (wa != 0) & np.all(np.abs(c[:, :2]) <= half, axis=1)
     near = sink & ~crossed & (np.abs(wb) <= margin) & np.all(np.abs(b[:, :2]) <= half + margin, axis=1)
     arrival_local = np.where(crossed[:, None], c, b)

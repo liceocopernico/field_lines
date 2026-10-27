@@ -4,20 +4,27 @@ Electric field lines, equipotentials and capacitors, in 3D space or in a 2D
 plane, with a Qt window around a [PyVista](https://pyvista.org) 3D view.
 The interface speaks Italian and English.
 
-- **Point charges:** place them, drag them, change them, and watch the field
-  lines grow out of the positive charges and end on the negative ones.
-- **Parallel plate capacitor:** two finite plates, either with a uniform
-  surface charge (superposition) or as conductors held at a potential
-  difference (Laplace's equation), with E, ΔV, Q and C read out.
-- **Views:** field lines, equipotential surfaces (lines in 2D), an arrow
-  grid, and a movable plane coloured by V or |E|.
+Two models:
+
+- **Point charges and charged sheets:** place charges, drag them, change
+  them, and watch the field lines grow out of the positive charges and end
+  on the negative ones; a parallel plate capacitor whose plates carry a
+  uniform surface charge.
+- **Conductors at fixed potentials (Laplace):** metallic spheres and a
+  parallel plate capacitor, each held at its potential. Their charges are
+  solved, and the surfaces are coloured by their charge density.
+
+In both, the capacitor's E, ΔV, Q and C are read out, and the field can be
+shown as field lines, equipotential surfaces (lines in 2D), an arrow grid,
+and a movable plane coloured by V or |E|.
 
 ## Run
 
 ```bash
 uv run field-lines                      # 3D, dipole, language of the system
 uv run field-lines --mode 2d            # the 2D plane, like the old pygame app
-uv run field-lines --preset capacitor   # empty, single, dipole, equal, quadrupole, capacitor
+uv run field-lines --preset capacitor   # empty, single, dipole, equal, quadrupole, capacitor,
+                                        # sphere, two_spheres, sphere_in_capacitor
 uv run field-lines --lang en            # it or en
 ```
 
@@ -28,13 +35,20 @@ NumPy, SciPy).
 
 The panel on the right holds:
 
-- **2D / 3D:** going to 2D moves the charges onto the z = 0 plane and turns a
-  capacitor so that its plates cross the plane.
-- **Setup:** ready-made setups.
-- **Point charges:** a table of q (nC) and x, y, z (cm), plus buttons to add
-  or remove charges.
-- **Capacitor:** plate size, separation d, the model, σ or ΔV, and an option
-  to colour the plates by their surface charge density (red +, blue −).
+- **2D / 3D:** going to 2D moves the charges and spheres onto the z = 0
+  plane and turns a capacitor so that its plates cross the plane.
+- **Model:** point charges and charged sheets, or conductors at fixed
+  potentials.
+- **Setup:** ready-made setups. Those with spheres switch to the conductors
+  model, those with charges to the charges model.
+- **Point charges** (charges model): a table of q (nC) and x, y, z (cm), plus
+  buttons to add or remove charges.
+- **Metal spheres** (conductors model): a table of potential V, radius and
+  centre (cm), with each sphere's charge Q, plus buttons to add or remove
+  spheres.
+- **Capacitor:** plate size, separation d, σ (charges model) or ΔV
+  (conductors model), and an option to colour the plates by their surface
+  charge density (red +, blue −).
 - **Show:** field lines (lines per nC), equipotentials (number of levels),
   arrows, and the coloured plane (V or |E|, its axis and position).
 - **Animation:** replay the growth of the lines, and set its speed.
@@ -46,10 +60,11 @@ In the view:
 |---|---|---|
 | left drag | rotate | pan |
 | right drag / wheel | zoom | zoom |
-| drag a charge | moves it parallel to the screen | moves it in the plane |
+| drag a charge or a sphere | moves it parallel to the screen | moves it in the plane |
 | click | on the coloured plane: a field line through that point | a field line through that point |
 | wheel on a charge | changes q by 0.25 nC | changes q by 0.25 nC |
 | `C` / `M` | add a +2 / −2 nC charge under the mouse | same |
+| `S` | add a metal sphere at 1000 V under the mouse (conductors model) | same |
 | `T` | flip the sign of the charge under the mouse | same |
 | `R` | clear everything | same |
 
@@ -68,12 +83,14 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
   (a Fibonacci sphere).
 - In 2D they start evenly on a circle in the plane. These are still the
   lines of 3D point charges, cut by the plane, as in the old app.
-- From a plate, lines start in proportion to the flux leaving each part of
-  each face. That is why only a few leave the outer faces, and why in the
-  conductor model they crowd at the edges.
+- From a plate or a sphere, lines start in proportion to the flux leaving
+  each part of its surface. That is why only a few leave a plate's outer
+  face, and why on conductors they crowd where the charge does.
 - Lines start from the sign with the larger total charge: forward along E
   from + sources, or backwards from − sources when the negative charge is
-  larger.
+  larger. A conductor may be positive in some parts and negative in others
+  (a grounded sphere between the plates is both): its lines are as many as
+  the charge of its parts of that sign.
 
 **Tracing.**
 - All lines advance together, with RK4 along the unit vector of E, so the
@@ -88,43 +105,47 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
   negative source. Only setups with a net charge send lines to infinity.
 - The growth animation skips the parts of a line outside the view: a line
   leaves the screen and reappears where it comes back.
-- A line stops at an opposite charge or plate, at a null point (where it
-  turns back on itself), or 100 m away.
+- A line stops at an opposite charge or plate, on any conductor (plate or
+  sphere) in the conductors model, at a null point (where it turns back on
+  itself), or 100 m away.
 
 **Uniform-σ plates.** E and V of a uniformly charged rectangle come from
 their closed-form integrals, not from summing many small charges. In the
 middle of a large capacitor this gives the textbook σ/ε₀ (checked in the
 tests).
 
-**Conductor plates.** The plates are held at ±ΔV/2 and Laplace's equation
-is solved on a grid. Only one octant is solved:
-- the potential is odd across the midplane between the plates and even
-  across the other two central planes;
-- the grid is fine (at least 10 cells across the gap) near the plates and
-  grows towards a box 3 plate sides away;
-- the system is solved in finite volumes by conjugate gradients;
-- the capacitor is alone in empty space. The box is held at the potential
-  the plates' own charges make there, found by solving once with the box at
-  0 V and once more with the box at the potential of the charges found.
-  Outside the box, the field is the field of those charges, so lines can
-  loop far out and come back.
-- Next to a plate, E is taken from V on that side of the plate only, so it
-  points the right way on both faces.
+**Conductors.** Plates and spheres are held at their potentials (the
+plates at ±ΔV/2, each sphere at its V, all with respect to infinity), alone
+in empty space. Their charges are found on their surfaces (boundary
+elements, or the method of moments):
+- each surface is cut into small flat panels with a uniform σ: a plate into
+  25 × 25 panels, finer towards its edges; a sphere into 384 panels, a cube
+  projected onto it;
+- the densities are chosen so that the centre of every panel is at its
+  conductor's potential. That solves Laplace's equation outside the
+  conductors, with V → 0 far away, without a grid;
+- a panel acts as a uniformly charged rectangle (closed form) on points
+  within 4 panel sizes, and as a point charge farther away; far from a group
+  of panels, the group acts as one charge and a dipole. That keeps the
+  field quick to evaluate, also far out where field lines loop.
 
-The charge of each plate cell is ε₀ times the flux of E out of it. From
-that the panel shows Q, C = Q/ΔV (larger than ε₀A/d because of fringing)
-and σ, which is larger at the edges.
+A new potential is solved at once; moving or resizing a sphere, or
+changing the plates, takes a fraction of a second (the solve runs in the
+background, and the old lines stay meanwhile). Spheres may not touch each
+other or the plates. In this model the point charges do not take part.
 
-Coloured by density, a conductor shows its two faces separately, each with
-σ = ε₀ E just outside it. The inner faces carry σ = ε₀ΔV/d in the middle,
-the outer faces much less, and both crowd towards the edges. In 3D both
-faces of each plate are coloured; in 2D the plate's cut through the plane
-is drawn as two strips, inner and outer. A uniform-σ plate is one colour.
+From the panels' charges the panel shows Q, C = Q/ΔV (larger than ε₀A/d
+because of fringing) and each sphere's Q. A plate's two faces are told
+apart: each carries σ = ε₀ E just outside it. The inner faces carry
+σ = ε₀ΔV/d in the middle, the outer faces much less, and both crowd towards
+the edges.
 
-A 10 cm × 10 cm capacitor 3 cm apart solves in under a second. Smaller
-gaps need a finer grid and take up to about 10 s. Below about d/L = 0.08 the panel raises d to the
-smallest gap the grid can handle and says so. In this model the point
-charges do not take part.
+Coloured by density, a plate shows its two faces separately; in 2D its cut
+through the plane is two strips, inner and outer. A sphere is always
+coloured by its σ: its whole surface in 3D, a ring along its cut in 2D. A
+grounded sphere between the plates has no net charge, but is negative on
+the side facing the + plate and positive on the other. A uniform-σ plate is
+one colour.
 
 **Readouts.**
 - E at the centre.
@@ -143,18 +164,22 @@ uv run pytest
 - The capacitor's textbook limits.
 - Field lines: dipole symmetry, null points, line counts, speed, and
   regression tests for the old app's freezes.
-- The conductor model:
-  - the plates at ±ΔV/2;
+- The conductors model:
+  - an isolated sphere: Q = 4πε₀RV, uniform σ = ε₀V/R, the field of a point
+    charge outside and none inside;
+  - the plates at ±ΔV/2, the gap field ΔV/d, Q₊ = −Q₋, a dipole far away;
   - convergence of C, and agreement with Kirchhoff's fringing estimate;
-  - more charge at the edges;
+  - more charge at the edges, and the two faces adding up;
   - Gauss's law around each plate;
-  - the octant against a solve of the whole grid.
+  - the grounded sphere between the plates: neutral, charged on each side;
+  - the grouped panels against the panel-by-panel sum;
+  - every line starting and ending on a conductor, in 2D staying in the plane.
 
 **Render tests** draw off-screen with PyVista. **GUI tests** drive the real
 window on Qt's offscreen platform, without drawing (VTK has no OpenGL context
 there). Some of them send real Qt mouse, wheel and key events to the 3D
 view: a click versus a drag, the wheel on a charge versus on empty space,
-dragging a charge, and the keys.
+dragging a charge or a sphere, and the keys.
 
 ## Layout
 
@@ -162,14 +187,14 @@ dragging a charge, and the keys.
 src/field_lines/
   units.py        SI constants, display units, formatting of readouts
   sources.py      point charges and uniformly charged plates (closed form)
-  conductors.py   the conductor model: Laplace's equation on one octant
+  conductors.py   conductors at fixed potentials: surface charges by boundary elements
   seeding.py      where lines start (number proportional to charge or flux)
   tracing.py      vectorized RK4 tracing with its stopping rules
   sampling.py     grids for equipotentials, arrows and the coloured plane
-  scene.py        what is shown (sources, 2D/3D, capacitor model); no Qt
+  scene.py        what is shown (model, sources, 2D/3D); no Qt
   presets.py      ready-made setups
   view.py         PyVista actors and the 2D/3D camera
-  interaction.py  draggable charges, clicks, screen <-> world
+  interaction.py  draggable charges and spheres, clicks, screen <-> world
   panel.py        the Qt side panel
   strings.py      every visible text, in Italian and English
   app.py          the main window, which wires everything together

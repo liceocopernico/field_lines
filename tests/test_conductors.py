@@ -2,41 +2,76 @@ import math
 
 import numpy as np
 import pytest
-from scipy.sparse.linalg import cg
 
 from field_lines import conductors, presets
-from field_lines.conductors import ConductorSolution
-from field_lines.scene import Scene
+from field_lines.conductors import Solver, Sphere, evaluate, touching
+from field_lines.scene import Capacitor, Scene
 from field_lines.units import EPS0, K
 
 L = 0.10  # plate side
 
 
 @pytest.fixture(scope="module")
-def grid():
-    """10 cm square plates, 3 cm apart."""
-    return conductors.solve(L, L, 0.03)
+def capacitor():
+    """10 cm square plates, 3 cm apart, at ±250 V."""
+    cap = Capacitor()
+    return cap, Solver(cap.plates(), []).solve([250.0, -250.0])
 
 
-def test_plates_are_at_plus_and_minus_half_the_voltage(grid):
-    solution = ConductorSolution(grid, 500.0, "z")
-    points = np.array([[0, 0, 0.015], [0.03, -0.04, 0.015], [0, 0, -0.015], [-0.02, 0.01, -0.015], [0, 0, 0]])
-    np.testing.assert_allclose(solution.potential(points), [250, 250, -250, -250, 0], atol=1e-9)
+def conductor_scene(key: str, planar: bool = False) -> Scene:
+    scene = Scene()
+    scene.planar = planar
+    scene.kind = "conductors"
+    presets.load(scene, key)
+    scene.conductor = Solver(scene.conductor_plates(), scene.spheres).solve(scene.voltages())
+    return scene
 
 
-def test_field_between_the_centres_is_voltage_over_gap(grid):
-    solution = ConductorSolution(grid, 500.0, "z")
+def test_isolated_sphere_charge_and_density():
+    R, V = 0.02, 1000.0
+    solution = Solver([], [Sphere([0.01, -0.02, 0.03], R, V)]).solve([V])
+    assert solution.charge(0) == pytest.approx(4 * math.pi * EPS0 * R * V, rel=5e-3)
+    np.testing.assert_allclose(solution.sphere_sigma(0), EPS0 * V / R, rtol=0.08)
+
+
+def test_isolated_sphere_looks_like_a_point_charge_outside():
+    center = np.array([0.01, -0.02, 0.03])
+    solution = Solver([], [Sphere(center, 0.02, 1000.0)]).solve([1000.0])
+    Q = solution.charge(0)
+    points = center + np.array([[0.05, 0, 0], [0, 0.03, 0.04], [0.0, 0.0, 0.025], [1.0, 2.0, -2.0]])
+    r = points - center
+    d = np.linalg.norm(r, axis=1)
+    np.testing.assert_allclose(solution.potential(points), K * Q / d, rtol=2e-3)
+    exact = K * Q * r / d[:, None] ** 3
+    np.testing.assert_allclose(solution.field(points), exact, rtol=1e-2, atol=1e-4 * np.abs(exact).max())
+    assert np.linalg.norm(solution.field(center[None])[0]) < 0.02 * K * Q / 0.02**2  # no field inside a conductor
+
+
+def test_plates_are_at_their_potentials(capacitor):
+    _, solution = capacitor
+    panels = solution.panels
+    target = np.where(panels.owner == 0, 250.0, -250.0)
+    np.testing.assert_allclose(solution.potential(panels.centers), target, atol=0.5)  # clusters: within 0.2%
+    between = np.array([[0.03, -0.04, 0.015], [-0.02, 0.01, -0.015]])
+    np.testing.assert_allclose(solution.potential(between), [250, -250], rtol=0.01)
+
+
+def test_capacitor_gap_field_and_charges(capacitor):
+    _, solution = capacitor
     E = solution.field(np.zeros((1, 3)))[0]
-    assert E[2] == pytest.approx(-500 / 0.03, rel=0.01)  # from the + plate (top) down to the - plate
-    assert abs(E[0]) < 1e-9 and abs(E[1]) < 1e-9
+    assert E[2] == pytest.approx(-500 / 0.03, rel=0.01)  # from the + plate (top) to the - plate
+    assert abs(E[0]) < 1 and abs(E[1]) < 1
+    assert solution.charge(0) == pytest.approx(-solution.charge(1), rel=1e-9)
 
 
-def test_capacitance_with_fringing_at_d_over_l_one_tenth():
+def test_capacitance_converges_and_matches_kirchhoff(monkeypatch):
     d = 0.1 * L
-    C = conductors.solve(L, L, d).capacitance
-    reference = conductors.solve(L, L, d, refine=1.25).capacitance
+    cap = Capacitor(separation=d)
+    C = Solver(cap.plates(), []).solve([0.5, -0.5]).charge(0)
+    monkeypatch.setattr(conductors, "PLATE_PANELS", 35)
+    finer = Solver(cap.plates(), []).solve([0.5, -0.5]).charge(0)
     ideal = EPS0 * L * L / d
-    assert C == pytest.approx(reference, rel=0.05)
+    assert C == pytest.approx(finer, rel=0.02)
     assert C > ideal
     # Kirchhoff's first-order fringing for thin discs, for a square of the same area,
     # with the edge term scaled by the perimeter ratio 4 / (2√π)
@@ -45,13 +80,16 @@ def test_capacitance_with_fringing_at_d_over_l_one_tenth():
     assert C == pytest.approx(kirchhoff, rel=0.05)
 
 
-def test_charge_piles_up_at_the_edges(grid):
-    centre = grid.sigma[0, 0]
-    edge = grid.sigma[-1, 0]
-    corner = grid.sigma[-1, -1]
-    assert centre > 0
-    assert edge > 2 * centre
-    assert corner > edge
+def test_charge_density_on_each_face(capacitor):
+    _, solution = capacitor
+    inner, outer = solution.faces[0]
+    c = conductors.PLATE_PANELS // 2
+    assert inner[c, c] == pytest.approx(EPS0 * 500 / 0.03, rel=0.01)  # σ = ε₀ E = ε₀ ΔV/d in the middle
+    assert 0 < outer[c, c] < 0.5 * inner[c, c]  # little charge on the outer face...
+    assert outer[0, c] > 3 * outer[c, c]  # ...most of it near the edges
+    assert inner[0, c] > inner[c, c]
+    mine = solution.panels.owner == 0
+    np.testing.assert_allclose((inner + outer).ravel(), solution.sigma[mine], rtol=1e-9)
 
 
 def gauss_flux(solution, center, half, n=60):
@@ -71,157 +109,82 @@ def gauss_flux(solution, center, half, n=60):
     return EPS0 * total
 
 
-def test_gauss_law_gives_equal_and_opposite_plate_charges(grid):
-    solution = ConductorSolution(grid, 100.0, "z")
+def test_gauss_law_around_each_plate(capacitor):
+    _, solution = capacitor
     half = np.array([0.065, 0.065, 0.008])
-    plus = gauss_flux(solution, np.array([0, 0, 0.015]), half)
-    minus = gauss_flux(solution, np.array([0, 0, -0.015]), half)
-    assert plus == pytest.approx(solution.charge, rel=0.05)
-    assert minus == pytest.approx(-solution.charge, rel=0.05)
+    assert gauss_flux(solution, np.array([0, 0, 0.015]), half) == pytest.approx(solution.charge(0), rel=0.03)
+    assert gauss_flux(solution, np.array([0, 0, -0.015]), half) == pytest.approx(solution.charge(1), rel=0.03)
 
 
-def test_octant_matches_a_solve_of_the_whole_grid():
-    width, height, d = 0.06, 0.04, 0.02
-    octant = conductors.solve(width, height, d, refine=0.5)
-    axes = [np.concatenate((-a[:0:-1], a)) for a in octant.axes]  # mirror every axis
-    shape = tuple(len(a) for a in axes)
-    A = conductors._laplacian(axes)
-    fixed = np.zeros(shape, dtype=bool)
-    fixed[[0, -1], :, :] = fixed[:, [0, -1], :] = fixed[:, :, [0, -1]] = True
-    u, v, w = axes
-    # the box at the potentials the octant solve gave it, mirrored (odd across the midplane)
-    nodes = np.stack(np.meshgrid(u, v, w, indexing="ij"), axis=-1)[fixed]
-    V = np.zeros(shape)
-    V[fixed] = np.sign(nodes[:, 2]) * octant.interpolator(np.abs(nodes))[:, 0]
-    on_plate = (np.abs(u) <= width / 2 + 1e-12)[:, None] & (np.abs(v) <= height / 2 + 1e-12)[None, :]
-    for sign in (1, -1):
-        k = int(np.argmin(np.abs(w - sign * d / 2)))
-        fixed[:, :, k] |= on_plate
-        V[:, :, k][on_plate] = sign * 0.5
-    free = ~fixed.ravel()
-    x, info = cg(A[free][:, free], -(A[free][:, ~free] @ V.ravel()[~free]), rtol=1e-10, maxiter=5000)
-    assert info == 0
-    V.ravel()[free] = x
-    solution = ConductorSolution(octant, 1.0, "z")
-    grid_points = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
-    np.testing.assert_allclose(solution.potential(grid_points), V.ravel(), atol=1e-6)
+def test_far_away_the_capacitor_is_a_dipole(capacitor):
+    _, solution = capacitor
+    far = solution.field(np.array([[0.0, 0.0, 5.0]]))[0]
+    assert far[2] == pytest.approx(2 * K * solution.charge(0) * 0.03 / 5.0**3, rel=0.02)
 
 
-def test_turned_capacitor_is_the_same_field_with_permuted_axes(grid):
-    along_z = ConductorSolution(grid, 100.0, "z")
-    along_x = ConductorSolution(grid, 100.0, "x")
-    p = np.random.default_rng(3).uniform(-0.08, 0.08, (30, 3))
-    # normal z: (u, v, w) = (x, y, z); normal x: (u, v, w) = (y, z, x)
-    p_x = p[:, [2, 0, 1]]
-    np.testing.assert_allclose(along_x.potential(p_x), along_z.potential(p))
-    np.testing.assert_allclose(along_x.field(p_x), along_z.field(p)[:, [2, 0, 1]])
+def test_grounded_sphere_between_the_plates_is_neutral_but_charged_on_each_side():
+    scene = conductor_scene("sphere_in_capacitor")
+    plate_charge = scene.conductor.charge(0)
+    assert abs(scene.sphere_charge(0)) < 1e-3 * plate_charge
+    sigma = scene.conductor.sphere_sigma(0)
+    assert sigma.min() < -0.5 * sigma.max() < 0  # negative towards the + plate, positive towards the -
+    side = scene.conductor.panels.centers[scene.conductor.panels.owner == 2][:, 2]  # the plates are along z
+    assert sigma[side > 0.005].mean() < 0 < sigma[side < -0.005].mean()
 
 
-def test_min_separation_fits_the_budget():
-    d = conductors.min_separation(L, L)
-    assert conductors.unknowns(L, L, d) <= conductors.MAX_UNKNOWNS
-    assert conductors.unknowns(L, L, 0.95 * d) > conductors.MAX_UNKNOWNS
-    with pytest.raises(ValueError):
-        conductors.solve(L, L, 0.5 * d)
+def test_clusters_match_the_panel_by_panel_sum(capacitor):
+    _, solution = capacitor
+    points = np.random.default_rng(2).uniform(-0.1, 0.1, (300, 3))
+    V, E = evaluate(solution.panels, solution.sigma, points, clusters=solution.solver.clusters)
+    V0, E0 = evaluate(solution.panels, solution.sigma, points)
+    assert np.abs(V - V0).max() < 3e-3 * np.abs(V0).max()
+    error = np.linalg.norm(E - E0, axis=1) / np.linalg.norm(E0, axis=1)
+    assert np.median(error) < 0.01
 
 
-def test_conductor_capacitor_in_2d_keeps_lines_in_the_plane():
-    scene = Scene()
-    scene.planar = True
-    presets.load(scene, "capacitor")
-    cap = scene.capacitor
-    cap.model = "conductor"
-    scene.conductor = ConductorSolution(conductors.solve(cap.width, cap.height, cap.separation), cap.voltage, cap.normal)
+def test_touching_spheres_and_plates():
+    plates = Capacitor().plates()
+    assert touching(plates, [Sphere([0, 0, 0.0], 0.0145)])  # reaches the plates at ±1.5 cm
+    assert not touching(plates, [Sphere([0, 0, 0.0], 0.01)])
+    assert touching([], [Sphere([0, 0, 0], 0.02), Sphere([0.03, 0, 0], 0.015)])
+    assert not touching(plates, [Sphere([0.09, 0, 0], 0.02)])
+
+
+@pytest.mark.parametrize("planar", [True, False])
+@pytest.mark.parametrize("key", ["capacitor", "sphere_in_capacitor", "two_spheres"])
+def test_every_line_ends_on_a_conductor(key, planar):
+    scene = conductor_scene(key, planar)
     lines = scene.lines()
     assert lines
-    assert all(np.abs(line.points[:, 2]).max() < 1e-12 for line in lines)
-    assert all(line.end in ("plate", "bounds") for line in lines)
-    readouts = scene.capacitor_readouts()
-    assert readouts["dV"] == pytest.approx(cap.voltage)
-    assert readouts["C"] > readouts["C_ideal"]
+    ends = [line.end for line in lines]
+    assert sum(end in ("plate", "sphere") for end in ends) >= len(ends) - 1  # at most one escapes past 100 m
+    for line in lines:  # and every line starts on a conductor's surface
+        start = line.points[0]
+        on_plate = any(abs(p.to_local(start[None])[0, 2]) < 1e-9 for p in scene.conductor_plates())
+        on_sphere = any(abs(np.linalg.norm(start - s.center) - s.radius) < 1e-9 for s in scene.spheres)
+        assert on_plate or on_sphere
+    if planar:
+        assert all(np.abs(line.points[:, 2]).max() == 0.0 for line in lines)
 
 
-def test_field_next_to_the_plates_points_the_right_way(grid):
-    """A central difference across the one-node plate would make E point back at it from outside."""
-    solution = ConductorSolution(grid, 500.0, "z")
-    across = np.linspace(-0.049, 0.049, 40)
-    for z, expected_sign in ((0.0155, 1), (0.0145, -1), (-0.0145, -1), (-0.0155, 1)):
-        # just outside the + plate E points up, away from it; between the plates down; outside - up into it
-        points = np.column_stack((across, np.zeros(40), np.full(40, z)))
-        Ez = solution.field(points)[:, 2]
-        assert np.all(np.sign(Ez) == expected_sign), z
-    centre = solution.field(np.array([[0.0, 0.0, 0.0145]]))[0, 2]
-    assert centre == pytest.approx(-500 / 0.03, rel=0.01)  # the full gap field, right up to the plate
-
-
-def test_lines_run_from_plate_surface_to_plate_surface():
-    scene = Scene()
-    scene.planar = True
-    presets.load(scene, "capacitor")
+def test_lines_bulge_out_at_the_plate_edges():
+    scene = conductor_scene("capacitor", planar=True)
     cap = scene.capacitor
-    cap.model = "conductor"
-    scene.conductor = ConductorSolution(conductors.solve(cap.width, cap.height, cap.separation), cap.voltage, cap.normal)
-    lines = scene.lines()
-    for line in lines:
-        assert line.points[0, 0] == pytest.approx(cap.separation / 2)  # on the + plate (normal x)
-        if line.end == "plate":
-            assert line.points[-1, 0] == pytest.approx(-cap.separation / 2)
-    inner = [line for line in lines if line.points[1, 0] < cap.separation / 2]
-    # near the edges the gap lines bulge outwards (fringing) instead of running straight across
+    inner = [line for line in scene.lines() if abs(line.points[1, 0]) < cap.separation / 2]
     outermost = max(inner, key=lambda line: abs(line.points[0, 1]))
     assert np.abs(outermost.points[:, 1]).max() > cap.width / 2
 
 
-def test_the_field_carries_on_smoothly_outside_the_box(grid):
-    """Outside the grid's box the field is that of the plates' charges, which also set the box's potential."""
-    solution = ConductorSolution(grid, 1.0, "z")
-    end = grid.axes[0][-1]
-    inside = np.array([[0.999 * end, 0.02, 0.05], [0.03, 0.04, 0.999 * end]])
-    outside = inside * np.array([[1.002 / 0.999, 1, 1], [1, 1, 1.002 / 0.999]])
-    np.testing.assert_allclose(solution.potential(outside), solution.potential(inside), rtol=0.03)
-    np.testing.assert_allclose(solution.field(outside), solution.field(inside), rtol=0.1, atol=2e-3)
-    # far away: the field of a dipole, Q d along the axis
-    far = solution.field(np.array([[0.0, 0.0, 5.0]]))[0]
-    dipole = 2 * K * solution.charge * grid.separation / 5.0**3
-    assert far[2] == pytest.approx(dipole, rel=0.05)
-
-
-@pytest.mark.parametrize("planar", [True, False])
-@pytest.mark.parametrize("model", ["sigma", "conductor"])
-def test_every_line_from_the_positive_plate_ends_on_the_negative_plate(planar, model):
-    scene = Scene()
-    scene.planar = planar
-    presets.load(scene, "capacitor")
-    cap = scene.capacitor
-    cap.model = model
-    if model == "conductor":
-        grid = conductors.solve(cap.width, cap.height, cap.separation)
-        scene.conductor = ConductorSolution(grid, cap.voltage, cap.normal)
-    lines = scene.lines()
-    assert lines
-    assert all(line.end == "plate" for line in lines)
-
-
-def test_charge_density_on_each_face(grid):
-    inner, outer = grid.sigma_faces * 500.0  # C/m² at 500 V
-    assert inner[0, 0] == pytest.approx(EPS0 * 500 / 0.03, rel=0.01)  # the gap field: σ = ε₀ E = ε₀ ΔV/d
-    assert 0 < outer[0, 0] < 0.5 * inner[0, 0]  # little charge on the outer face...
-    assert outer[-1, 0] > 3 * outer[0, 0]  # ...and most of it near the edges
-    assert inner[-1, 0] > inner[0, 0]
-    # the two faces together are the whole charge of each node (away from the rim)
-    np.testing.assert_allclose((inner + outer)[:-1, :-1], 500.0 * grid.sigma[:-1, :-1], rtol=1e-9)
-
-
-def test_plate_densities_of_the_conductor_model(grid):
-    scene = Scene()
-    presets.load(scene, "capacitor")
-    scene.capacitor.model = "conductor"
-    assert scene.plate_densities() is None  # still being computed
-    scene.conductor = ConductorSolution(grid, scene.capacitor.voltage, "z")
+def test_plate_and_sphere_densities_for_drawing():
+    scene = conductor_scene("sphere_in_capacitor")
     plus, minus = scene.plate_densities()
-    assert plus.plate.sigma > 0 > minus.plate.sigma
-    np.testing.assert_array_equal(minus.inner, -plus.inner)
-    np.testing.assert_array_equal(plus.inner, plus.inner[::-1, ::-1])  # mirrored over the whole plate
-    assert plus.u[0] == -plus.u[-1] == pytest.approx(-scene.capacitor.width / 2)
-    centre_inner, centre_outer = plus.at(0.0, 0.0)
-    assert centre_inner > centre_outer > 0
+    assert plus.u[0] == pytest.approx(-scene.capacitor.width / 2)
+    assert plus.u[-1] == pytest.approx(scene.capacitor.width / 2)
+    assert plus.inner.shape == (len(plus.u), len(plus.v))
+    np.testing.assert_allclose(minus.inner, -plus.inner, rtol=1e-4)
+    ((points, quads, sigma),) = scene.sphere_densities()
+    assert len(quads) == len(sigma) == 6 * conductors.SPHERE_PANELS**2
+    scene.conductor = None  # being solved again: the plates plain, the spheres without σ (drawn grey)
+    assert scene.plate_densities() is None
+    ((_, quads, sigma),) = scene.sphere_densities()
+    assert sigma is None and len(quads) == 6 * conductors.SPHERE_PANELS**2

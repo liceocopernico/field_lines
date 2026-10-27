@@ -79,33 +79,14 @@ class Plate:
         out[:, self.local_axes] = vectors
         return out
 
-    def _corner_terms(self, points: np.ndarray):
-        """Distances from the point to the plate's sides and the log integrals over them.
-
-        x1, x2 (y1, y2) are the offsets of the plate's u (v) sides from the point.
-        L(x) = ∫ dy/R over y1..y2 at offset x, M(y) = ∫ dx/R over x1..x2 at offset y.
-        """
-        u, v, w = self.to_local(points).T
-        a, b = self.width / 2, self.height / 2
-        x1, x2, y1, y2 = -a - u, a - u, -b - v, b - v
-        w2 = w * w
-        L1, L2 = _log_ratio(y1, y2, x1 * x1 + w2), _log_ratio(y1, y2, x2 * x2 + w2)
-        M1, M2 = _log_ratio(x1, x2, y1 * y1 + w2), _log_ratio(x1, x2, y2 * y2 + w2)
-        atan_sum = sum(
-            sign * _solid_angle_term(x, y, w)
-            for x, y, sign in ((x2, y2, 1), (x1, y1, 1), (x1, y2, -1), (x2, y1, -1))
-        )
-        return x1, x2, y1, y2, w, L1, L2, M1, M2, atan_sum
-
     def field(self, points: np.ndarray) -> np.ndarray:
-        _, _, _, _, _, L1, L2, M1, M2, atan_sum = self._corner_terms(points)
-        local = K * self.sigma * np.column_stack((L2 - L1, M2 - M1, atan_sum))
-        return self.from_local(local)
+        u, v, w = self.to_local(points).T
+        local = rectangle_field(u, v, w, self.width / 2, self.height / 2)
+        return self.from_local(K * self.sigma * local)
 
     def potential(self, points: np.ndarray) -> np.ndarray:
-        x1, x2, y1, y2, w, L1, L2, M1, M2, atan_sum = self._corner_terms(points)
-        terms = _times(x2, L2) - _times(x1, L1) + _times(y2, M2) - _times(y1, M1) - w * atan_sum
-        return K * self.sigma * terms
+        u, v, w = self.to_local(points).T
+        return K * self.sigma * rectangle_potential(u, v, w, self.width / 2, self.height / 2)
 
     def field_ideal(self) -> float:
         """|E| next to an infinite plate with the same σ: σ / (2 ε₀)."""
@@ -129,6 +110,35 @@ class Superposition:
         for source in self.sources:
             total += source.potential(points)
         return total
+
+
+def _rectangle_terms(u, v, w, a, b):
+    """Offsets of the rectangle's sides from the point (u, v, w) and the integrals over them.
+
+    The rectangle is |u| <= a, |v| <= b, w = 0; a and b may be arrays, one per point.
+    x1, x2 (y1, y2) are the offsets of its u (v) sides from the point.
+    L(x) = ∫ dy/R over y1..y2 at offset x, M(y) = ∫ dx/R over x1..x2 at offset y.
+    """
+    x1, x2, y1, y2 = -a - u, a - u, -b - v, b - v
+    w2 = w * w
+    L1, L2 = _log_ratio(y1, y2, x1 * x1 + w2), _log_ratio(y1, y2, x2 * x2 + w2)
+    M1, M2 = _log_ratio(x1, x2, y1 * y1 + w2), _log_ratio(x1, x2, y2 * y2 + w2)
+    atan_sum = sum(
+        sign * _solid_angle_term(x, y, w) for x, y, sign in ((x2, y2, 1), (x1, y1, 1), (x1, y2, -1), (x2, y1, -1))
+    )
+    return x1, x2, y1, y2, L1, L2, M1, M2, atan_sum
+
+
+def rectangle_field(u, v, w, a, b) -> np.ndarray:
+    """E/(k σ) of a uniformly charged rectangle, in its local axes, at local points (u, v, w): (P, 3)."""
+    _, _, _, _, L1, L2, M1, M2, atan_sum = _rectangle_terms(u, v, w, a, b)
+    return np.column_stack((L2 - L1, M2 - M1, atan_sum))
+
+
+def rectangle_potential(u, v, w, a, b) -> np.ndarray:
+    """V/(k σ) of a uniformly charged rectangle at local points (u, v, w): (P,)."""
+    x1, x2, y1, y2, L1, L2, M1, M2, atan_sum = _rectangle_terms(u, v, w, a, b)
+    return _times(x2, L2) - _times(x1, L1) + _times(y2, M2) - _times(y1, M1) - w * atan_sum
 
 
 def _log_ratio(t1: np.ndarray, t2: np.ndarray, rho2: np.ndarray) -> np.ndarray:

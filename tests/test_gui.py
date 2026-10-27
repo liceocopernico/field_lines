@@ -153,36 +153,63 @@ def test_capacitor_preset_shows_plates_and_readouts(window):
     assert texts["readout_C_ideal"] == "2.95 pF"
 
 
+def wait_for_solve(window, qtbot):
+    window._solve_timer.setInterval(0)
+    if window._computing():
+        window._solve_timer.start()
+    qtbot.waitUntil(lambda: not window._computing(), timeout=20000)
+    window._retrace()
+
+
 def test_conductor_model_is_solved_in_the_background(window, qtbot):
     window.load_preset("capacitor")
-    window.panel.model_combo.setCurrentIndex(window.panel.model_combo.findData("conductor"))
+    window.panel.radio_conductors.setChecked(True)
     assert window.scene.uses_conductor
     assert window.scene.conductor is None
-    assert window.panel.capacitor_status.text() == tr("computing")
-    assert not window.panel.table.isEnabled()  # point charges do not take part in this model
-    window._solve_timer.setInterval(0)
-    window._solve_timer.start()
-    qtbot.waitUntil(lambda: window.scene.conductor is not None, timeout=20000)
-    window._retrace()
-    assert window.panel.capacitor_status.text() == ""
+    assert window.panel.model_status.text() == tr("computing")
+    assert not window.panel.charges_group.isVisibleTo(window.panel)  # point charges do not take part
+    assert window.panel.spheres_group.isVisibleTo(window.panel)
+    wait_for_solve(window, qtbot)
+    assert window.panel.model_status.text() == ""
     assert window.panel.readouts["readout_dV"].text() == "500 V"
-    assert window.panel.readouts["readout_C"].text() == "5.43 pF"
-    assert all(line.end in ("plate", "bounds") for line in window.view.lines)
+    assert window.panel.readouts["readout_C"].text() == "5.27 pF"
+    assert all(line.end == "plate" for line in window.view.lines)
     # a new ΔV needs no new solve
     window.panel.voltage_box.setValue(1000)
-    assert window.scene.conductor is not None and window.scene.conductor.voltage == 1000
+    assert window.scene.conductor is not None and window.scene.conductor.voltages[0] == 500
 
 
-def test_too_small_a_gap_is_clamped_in_the_conductor_model(window):
-    window.load_preset("capacitor")
-    window.panel.model_combo.setCurrentIndex(window.panel.model_combo.findData("conductor"))
-    window.panel.separation_box.setValue(0.2)
-    assert window.scene.capacitor.separation >= 0.0076
-    assert window.panel.separation_box.value() == pytest.approx(window.scene.capacitor.separation * 100)
-    assert "0.8 cm" in window.panel.capacitor_status.text().replace(",", ".")
+def test_metal_spheres_in_the_table(window, qtbot):
+    window.load_preset("sphere")
+    assert window.scene.uses_conductor and window.panel.radio_conductors.isChecked()
+    wait_for_solve(window, qtbot)
+    assert window.panel.sphere_table.rowCount() == 1
+    assert window.panel.sphere_table.cellWidget(0, 5).text() == "2.23"  # Q = 4πε₀RV, nC
+    assert len(window.view.sphere_actors) == 1 and tr("bar_sigma") in window.plotter.scalar_bars
+    # a new potential: no new solve, Q follows at once
+    window.panel.sphere_table.cellWidget(0, 0).setValue(500)
+    assert window.scene.conductor is not None
+    assert window.panel.sphere_table.cellWidget(0, 5).text() == "1.11"
+    # a bigger sphere: solved again; meanwhile it still shows (grey), and the table keeps its boxes
+    box = window.panel.sphere_table.cellWidget(0, 1)
+    box.setValue(3.0)
+    assert window._computing()
+    assert len(window.view.sphere_actors) == 1
+    assert window.panel.sphere_table.cellWidget(0, 1) is box
+    wait_for_solve(window, qtbot)
+    assert window.scene.spheres[0].radius == 0.03
+    assert not window.growing.any()  # an edit: the lines are updated, not grown again
+    qtbot.mouseClick(window.panel.add_sphere, QtCore.Qt.MouseButton.LeftButton)
+    assert len(window.scene.spheres) == 2
+    qtbot.mouseClick(window.panel.sphere_table.cellWidget(1, 6), QtCore.Qt.MouseButton.LeftButton)
+    assert len(window.scene.spheres) == 1
 
 
-# --- real Qt events, through VTK's event dispatch -------------------------
+def test_touching_spheres_are_not_solved(window, qtbot):
+    window.load_preset("two_spheres")
+    window.panel.sphere_table.cellWidget(1, 2).setValue(-1.0)  # x of the second sphere, onto the first
+    assert window._touching and window.scene.conductor is None
+    assert window.panel.model_status.text() == tr("spheres_touch")
 
 
 def qt_point(window, world):
@@ -288,3 +315,43 @@ def test_colouring_the_plates_by_density(window):
     window.panel.plate_sigma_box.setChecked(False)
     assert len(window.view.plate_actors) == 2
     assert not any("density" in title or "densità" in title for title in window.plotter.scalar_bars.keys())
+
+
+def test_dragging_a_metal_sphere_with_the_mouse(window, qtbot):
+    window.load_preset("sphere")
+    in_2d(window)
+    wait_for_solve(window, qtbot)
+    qtbot.wait(50)  # the sphere table widened the panel: let the view take its new size first
+    start = qt_point(window, window.scene.spheres[0].center)
+    end = qt_point(window, [0.03, 0.03, 0.0])
+    qtbot.mousePress(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(window.plotter, (start + end) / 2)
+    qtbot.mouseMove(window.plotter, end)
+    qtbot.mouseRelease(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=end)
+    qtbot.wait(50)
+    np.testing.assert_allclose(window.scene.spheres[0].center, [0.03, 0.03, 0.0], atol=5e-4)
+    assert window.scene.click_seeds == []
+    wait_for_solve(window, qtbot)  # solved again where it was let go
+    assert window.scene.conductor.solver.spheres[0].center == pytest.approx(window.scene.spheres[0].center)
+
+
+def test_s_key_adds_a_sphere_in_the_conductors_model(window, qtbot):
+    window.load_preset("sphere")
+    in_2d(window)
+    qtbot.wait(50)  # the sphere table widened the panel: let the view take its new size first
+    qtbot.mouseMove(window.plotter, qt_point(window, [-0.06, 0.05, 0.0]))
+    qtbot.keyClick(window.plotter, "s")
+    assert len(window.scene.spheres) == 2
+    np.testing.assert_allclose(window.scene.spheres[1].center, [-0.06, 0.05, 0.0], atol=5e-4)
+    window.load_preset("dipole")  # the charges model: S does nothing
+    qtbot.keyClick(window.plotter, "s")
+    assert window.scene.spheres == []
+
+
+def test_click_on_a_metal_sphere_seeds_nothing(window, qtbot):
+    window.load_preset("sphere")
+    in_2d(window)
+    wait_for_solve(window, qtbot)
+    qtbot.wait(50)
+    window._clicked(tuple(to_display(window.plotter, window.scene.spheres[0].center + [0.005, 0, 0])))
+    assert window.scene.click_seeds == []

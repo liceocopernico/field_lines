@@ -12,6 +12,15 @@ STRINGS: dict[str, dict[str, str]] = {
     "group_space": {"it": "Spazio", "en": "Space"},
     "mode_3d": {"it": "3D (spazio)", "en": "3D (space)"},
     "mode_2d": {"it": "2D (piano)", "en": "2D (plane)"},
+    # model
+    "group_model": {"it": "Modello", "en": "Model"},
+    "kind_charges": {"it": "Cariche puntiformi e lamine cariche", "en": "Point charges and charged sheets"},
+    "kind_conductors": {"it": "Conduttori a potenziale fissato (Laplace)", "en": "Conductors at fixed potentials (Laplace)"},
+    "computing": {"it": "Calcolo in corso…", "en": "Computing…"},
+    "spheres_touch": {
+        "it": "Le sfere non possono toccarsi né toccare le armature: spostale.",
+        "en": "Spheres may not touch each other or the plates: move them apart.",
+    },
     # presets
     "group_preset": {"it": "Configurazione", "en": "Setup"},
     "preset_empty": {"it": "Vuota", "en": "Empty"},
@@ -20,24 +29,23 @@ STRINGS: dict[str, dict[str, str]] = {
     "preset_equal": {"it": "Due cariche uguali", "en": "Two equal charges"},
     "preset_quadrupole": {"it": "Quadrupolo", "en": "Quadrupole"},
     "preset_capacitor": {"it": "Condensatore piano", "en": "Parallel plate capacitor"},
+    "preset_sphere": {"it": "Sfera metallica", "en": "Metal sphere"},
+    "preset_two_spheres": {"it": "Due sfere metalliche", "en": "Two metal spheres"},
+    "preset_sphere_in_capacitor": {"it": "Sfera nel condensatore", "en": "Sphere in the capacitor"},
     # point charges
     "group_charges": {"it": "Cariche puntiformi", "en": "Point charges"},
     "add_positive": {"it": "+ positiva", "en": "+ positive"},
     "add_negative": {"it": "− negativa", "en": "− negative"},
     "remove": {"it": "Rimuovi", "en": "Remove"},
-    "charges_disabled": {
-        "it": "Il modello a conduttori contiene solo le armature.",
-        "en": "The conductor model contains only the plates.",
-    },
+    # metallic spheres
+    "group_spheres": {"it": "Sfere metalliche", "en": "Metal spheres"},
+    "add_sphere": {"it": "+ sfera", "en": "+ sphere"},
     # capacitor
     "group_capacitor": {"it": "Condensatore", "en": "Capacitor"},
     "capacitor_show": {"it": "Mostra il condensatore", "en": "Show the capacitor"},
     "plate_width": {"it": "Larghezza armature", "en": "Plate width"},
     "plate_height": {"it": "Altezza armature", "en": "Plate height"},
     "separation": {"it": "Distanza d", "en": "Separation d"},
-    "model": {"it": "Modello", "en": "Model"},
-    "model_sigma": {"it": "σ uniforme (sovrapposizione)", "en": "Uniform σ (superposition)"},
-    "model_conductor": {"it": "Conduttori a ΔV fissata (Laplace)", "en": "Conductors at fixed ΔV (Laplace)"},
     "sigma": {"it": "Densità σ", "en": "Density σ"},
     "voltage": {"it": "Differenza di potenziale ΔV", "en": "Potential difference ΔV"},
     "plate_sigma": {"it": "Colora le armature con la densità σ", "en": "Colour the plates by their density σ"},
@@ -47,11 +55,6 @@ STRINGS: dict[str, dict[str, str]] = {
     "readout_Q": {"it": "Carica Q", "en": "Charge Q"},
     "readout_C": {"it": "Capacità C", "en": "Capacitance C"},
     "readout_C_ideal": {"it": "ε₀A/d (senza bordi)", "en": "ε₀A/d (no edges)"},
-    "computing": {"it": "Calcolo in corso…", "en": "Computing…"},
-    "clamped": {
-        "it": "d portata a {d} cm: con d più piccola la griglia diventa troppo fine.",
-        "en": "d set to {d} cm: a smaller d needs too fine a grid.",
-    },
     # views
     "group_views": {"it": "Visualizza", "en": "Show"},
     "view_lines": {"it": "Linee di campo", "en": "Field lines"},
@@ -72,12 +75,12 @@ STRINGS: dict[str, dict[str, str]] = {
     "group_language": {"it": "Lingua", "en": "Language"},
     # status bar and colour bars
     "hint_2d": {
-        "it": "Clic: linea per il punto · C/M: carica +/− · T: inverti · rotella su una carica: cambia q · R: azzera",
-        "en": "Click: line through the point · C/M: +/− charge · T: flip · wheel on a charge: change q · R: reset",
+        "it": "Clic: linea per il punto · C/M: carica +/− · S: sfera · T: inverti · rotella su una carica: cambia q · R: azzera",
+        "en": "Click: line through the point · C/M: +/− charge · S: sphere · T: flip · wheel on a charge: change q · R: reset",
     },
     "hint_3d": {
-        "it": "Trascina: ruota · trascina una carica: spostala · clic sul piano colorato: linea per il punto",
-        "en": "Drag: rotate · drag a charge: move it · click on the coloured plane: line through the point",
+        "it": "Trascina: ruota · trascina una carica o una sfera: spostala · clic sul piano colorato: linea per il punto",
+        "en": "Drag: rotate · drag a charge or a sphere: move it · click on the coloured plane: line through the point",
     },
     "readout": {"it": "V = {V}    |E| = {E}", "en": "V = {V}    |E| = {E}"},
     # VTK's font has no "|": E stands for the field's strength
