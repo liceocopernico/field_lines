@@ -91,3 +91,52 @@ def test_language_switch_changes_every_label(window):
     for setter, key in window.panel._texts:
         assert getattr(setter.__self__, getters[setter.__name__])() == tr(key)
     assert window.panel.preset_combo.itemText(window.panel.preset_combo.findData("dipole")) == "Dipole"
+
+
+def wait_for_fields(window, qtbot):
+    """Let the debounced worker thread deliver the sampled views."""
+    window._fields_timer.setInterval(0)
+    window.schedule_fields()
+
+    def settled():
+        pending = window._retrace_timer.isActive() or window._fields_timer.isActive()
+        return not pending and window._shown_generation == window._fields_generation
+
+    qtbot.waitUntil(settled, timeout=10000)
+
+
+def test_view_checkboxes_add_and_remove_actors(window, qtbot):
+    for box in (window.panel.equipotentials_box, window.panel.arrows_box, window.panel.slice_box):
+        qtbot.mouseClick(box, QtCore.Qt.MouseButton.LeftButton)
+    wait_for_fields(window, qtbot)
+    for name in ("equipotentials", "arrows", "slice"):
+        assert name in window.plotter.actors
+    qtbot.mouseClick(window.panel.lines_box, QtCore.Qt.MouseButton.LeftButton)
+    assert not window.view.line_actor.visibility
+    for box in (window.panel.equipotentials_box, window.panel.arrows_box, window.panel.slice_box):
+        box.setChecked(False)
+    wait_for_fields(window, qtbot)
+    for name in ("equipotentials", "arrows", "slice"):
+        assert name not in window.plotter.actors
+
+
+def test_changing_the_plane_quantity_replaces_its_colour_bar(window, qtbot):
+    window.panel.slice_box.setChecked(True)
+    wait_for_fields(window, qtbot)
+    assert tr("bar_V") in window.plotter.scalar_bars
+    window.panel.slice_quantity.setCurrentIndex(1)
+    wait_for_fields(window, qtbot)
+    assert tr("bar_slice_E") in window.plotter.scalar_bars
+    assert tr("bar_V") not in window.plotter.scalar_bars
+
+
+def test_click_on_the_plane_in_3d_seeds_a_line_and_reads_out(window, qtbot):
+    window.panel.slice_box.setChecked(True)
+    wait_for_fields(window, qtbot)
+    window.plotter.render()
+    display = to_display(window.plotter, np.array([0.0, 0.04, 0.0]))
+    window._mouse_moved(tuple(display))
+    assert "V =" in window.readout.text()
+    window._clicked(tuple(display))
+    assert len(window.scene.click_seeds) == 1
+    np.testing.assert_allclose(window.scene.click_seeds[0], [0.0, 0.04, 0.0], atol=1e-3)

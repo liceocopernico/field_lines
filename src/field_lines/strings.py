@@ -81,6 +81,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "readout": {"it": "V = {V}    |E| = {E}", "en": "V = {V}    |E| = {E}"},
     "bar_E": {"it": "|E| [V/m]", "en": "|E| [V/m]"},
     "bar_V": {"it": "V [V]", "en": "V [V]"},
+    "bar_slice_E": {"it": "|E| sul piano [V/m]", "en": "|E| on the plane [V/m]"},
 }
 
 _language = "it"

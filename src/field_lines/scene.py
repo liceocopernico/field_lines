@@ -1,5 +1,6 @@
 """What is being shown: the sources, 2D or 3D, the capacitor and its model. No Qt in here."""
 
+import copy
 import math
 from dataclasses import dataclass
 
@@ -80,6 +81,12 @@ class Scene:
         if self.uses_conductor:
             return self.conductor
         return Superposition([*self.charges, *self.plates()])
+
+    def snapshot(self) -> FieldModel | None:
+        """A copy of the field model that a worker thread can use while the scene keeps changing."""
+        if self.uses_conductor:
+            return self.conductor  # never modified once computed
+        return copy.deepcopy(self.model())
 
     def set_planar(self, planar: bool) -> None:
         """Switch between 2D and 3D. Going to 2D moves the charges onto z = 0."""

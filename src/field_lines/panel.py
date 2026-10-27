@@ -28,6 +28,11 @@ class ViewOptions:
     slice_position: float = 0.0  # m
 
 
+def _emit(signal) -> Callable[..., None]:
+    """A slot that emits signal without arguments, whatever the sender passes."""
+    return lambda *_args: signal.emit()
+
+
 def spin_box(lo: float, hi: float, step: float, decimals: int, value: float) -> QtWidgets.QDoubleSpinBox:
     box = QtWidgets.QDoubleSpinBox()
     box.setRange(lo, hi)
@@ -169,7 +174,7 @@ class Panel(QtWidgets.QWidget):
         form.addRow(self.sigma_label, self.sigma_box)
         form.addRow(self.voltage_label, self.voltage_box)
         for box in (self.width_box, self.height_box, self.separation_box, self.sigma_box, self.voltage_box):
-            box.valueChanged.connect(self.capacitor_changed.emit)
+            box.valueChanged.connect(_emit(self.capacitor_changed))
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         self.readouts: dict[str, QtWidgets.QLabel] = {}
         for key in ("readout_E_center", "readout_E_ideal", "readout_dV", "readout_Q", "readout_C", "readout_C_ideal"):
@@ -230,19 +235,22 @@ class Panel(QtWidgets.QWidget):
         form.addRow(self._label("slice_position"), self.slice_position)
         layout.addWidget(self.slice_form)
         for box in (self.lines_box, self.equipotentials_box, self.arrows_box, self.slice_box):
-            box.toggled.connect(self.views_changed.emit)
-        self.lines_per_nc.valueChanged.connect(self.views_changed.emit)
-        self.levels_box.valueChanged.connect(self.views_changed.emit)
-        self.slice_quantity.currentIndexChanged.connect(self.views_changed.emit)
-        self.slice_axis.currentIndexChanged.connect(self.views_changed.emit)
-        self.slice_position.valueChanged.connect(self.views_changed.emit)
+            box.toggled.connect(_emit(self.views_changed))
+        for signal in (
+            self.lines_per_nc.valueChanged,
+            self.levels_box.valueChanged,
+            self.slice_quantity.currentIndexChanged,
+            self.slice_axis.currentIndexChanged,
+            self.slice_position.valueChanged,
+        ):
+            signal.connect(_emit(self.views_changed))
         return group
 
     def _animation_group(self):
         group, layout = self._group("group_animation")
         self.replay_button = QtWidgets.QPushButton()
         self._text(self.replay_button.setText, "replay")
-        self.replay_button.clicked.connect(self.replay_requested.emit)
+        self.replay_button.clicked.connect(_emit(self.replay_requested))
         layout.addWidget(self.replay_button)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self._label("speed"))

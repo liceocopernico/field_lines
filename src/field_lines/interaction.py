@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 import numpy as np
 import pyvista as pv
 from vtkmodules.vtkInteractionWidgets import vtkSphereWidget
+from vtkmodules.vtkRenderingCore import vtkCellPicker
 
 from field_lines.scene import charge_radius
 from field_lines.sources import PointCharge
@@ -80,6 +81,17 @@ def mouse_on_plane(plotter: pv.Plotter, display, point, normal) -> np.ndarray | 
         return None
     t = (np.asarray(point, dtype=float) - origin) @ normal / denom
     return origin + t * direction
+
+
+def pick_on(plotter: pv.Plotter, actor, display) -> np.ndarray | None:
+    """The point of the actor under the display position, or None."""
+    picker = vtkCellPicker()
+    picker.SetTolerance(0.0005)
+    picker.PickFromListOn()
+    picker.AddPickList(actor)
+    if picker.Pick(display[0], display[1], 0, plotter.renderer):
+        return np.array(picker.GetPickPosition())
+    return None
 
 
 def to_display(plotter: pv.Plotter, point: np.ndarray) -> np.ndarray:

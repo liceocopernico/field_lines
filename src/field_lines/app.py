@@ -2,28 +2,52 @@
 
 import argparse
 import sys
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import numpy as np
 from PySide6 import QtCore, QtWidgets
 from pyvistaqt import QtInteractor
 
-from field_lines import presets, strings
-from field_lines.interaction import ChargeHandles, MouseEvents, charge_under_mouse, mouse_on_plane
-from field_lines.panel import Panel
-from field_lines.scene import VIEW_HALF, Scene
+from field_lines import presets, sampling, strings
+from field_lines.interaction import ChargeHandles, MouseEvents, charge_under_mouse, mouse_on_plane, pick_on
+from field_lines.panel import Panel, ViewOptions
+from field_lines.sampling import Exclusion
+from field_lines.scene import VIEW_HALF, Scene, charge_radius
 from field_lines.sources import PointCharge
 from field_lines.strings import tr
 from field_lines.units import CM, NC, format_quantity
 from field_lines.view import SceneView
 
 FRAME_MS = 33  # growth animation: about 30 frames per second
+FIELDS_DELAY_MS = 120  # equipotentials, arrows and plane are recomputed this long after the last change
 WHEEL_STEP = 0.25 * NC  # charge change per wheel notch
 NEW_CHARGE = 2 * NC
+
+
+@dataclass
+class FieldViews:
+    """What the worker thread computed for one state of the scene."""
+
+    generation: int
+    options: ViewOptions
+    planar: bool
+    equipotentials: object = None
+    arrows: object = None
+    slice: object = None
+
+
+class FieldsWorker(QtCore.QObject):
+    """Carries results from the worker thread back to the GUI thread."""
+
+    finished = QtCore.Signal(object)
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, preset: str = "dipole", planar: bool = False):
         super().__init__()
+        self.closed = False
         self.scene = Scene()
         self.scene.planar = planar
         self.plotter = QtInteractor(self)
@@ -65,6 +89,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._animate_next = False
         self._retrace_timer = QtCore.QTimer(self, singleShot=True, interval=0)
         self._retrace_timer.timeout.connect(self._retrace)
+        self.fields_worker = FieldsWorker(self)
+        self.fields_worker.finished.connect(self._fields_ready)
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._fields_generation = 0
+        self._shown_generation = -1  # the generation whose views are on screen
+        self._fields_timer = QtCore.QTimer(self, singleShot=True, interval=FIELDS_DELAY_MS)
+        self._fields_timer.timeout.connect(self._compute_fields)
 
         p = self.panel
         p.planar_changed.connect(self.set_planar)
@@ -123,6 +154,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.show_lines()
             self.plotter.render()
         self._animate_next = False
+        self.schedule_fields()
+
+    # --- equipotentials, arrows, coloured plane -------------------------
+
+    def schedule_fields(self) -> None:
+        """Recompute the sampled views a little later, in the worker thread."""
+        self._fields_generation += 1
+        self._fields_timer.start()
+
+    def _compute_fields(self) -> None:
+        options = self.panel.view_options()
+        result = FieldViews(self._fields_generation, options, self.scene.planar)
+        model = self.scene.snapshot()
+        if model is None or not (options.equipotentials or options.arrows or options.slice):
+            self._fields_ready(result)
+            return
+        exclusions = [Exclusion(c.position.copy(), charge_radius(c.q)) for c in self.scene.active_charges()]
+
+        def job():
+            try:
+                if options.equipotentials:
+                    result.equipotentials, _ = sampling.equipotentials(model, result.planar, options.levels, exclusions)
+                if options.arrows:
+                    result.arrows = sampling.arrows(model, result.planar, exclusions)
+                if options.slice:
+                    result.slice = sampling.slice_plane(model, options.slice_axis, options.slice_position, result.planar)
+            except Exception:
+                traceback.print_exc()
+                return
+            self.fields_worker.finished.emit(result)
+
+        self._executor.submit(job)
+
+    def _fields_ready(self, result: FieldViews) -> None:
+        if self.closed or result.generation != self._fields_generation:
+            return  # the scene changed meanwhile (a newer result is on its way), or the window is gone
+        self.view.set_equipotentials(result.equipotentials, result.planar)
+        self.view.set_arrows(result.arrows)
+        self.view.set_slice(result.slice, result.options.slice_quantity)
+        self._shown_generation = result.generation
+        self.plotter.render()
 
     def replay(self) -> None:
         self.growing = np.ones(len(self.view.lines), dtype=bool)
@@ -226,13 +298,21 @@ class MainWindow(QtWidgets.QMainWindow):
             normal = np.array(self.plotter.camera.direction_of_projection)
         return mouse_on_plane(self.plotter, display, (0.0, 0.0, 0.0), normal)
 
+    def _point_under_mouse(self, display) -> np.ndarray | None:
+        """2D: the point of the plane under the mouse; 3D: the point of the coloured plane, if it is shown."""
+        if self.scene.planar:
+            point = self._mouse_point(display)
+            if point is not None:
+                point[2] = 0.0
+            return point
+        if self.view.slice_actor is not None:
+            return pick_on(self.plotter, self.view.slice_actor, display)
+        return None
+
     def _clicked(self, display) -> None:
-        if not self.scene.planar:
-            return
-        point = self._mouse_point(display)
+        point = self._point_under_mouse(display)
         if point is None or np.any(np.abs(point) > VIEW_HALF):
             return
-        point[2] = 0.0
         self.scene.click_seeds.append(point)
         self._add_click_line()
 
@@ -248,7 +328,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _mouse_moved(self, display) -> None:
         model = self.scene.model()
-        point = self._mouse_point(display) if self.scene.planar else None
+        point = self._point_under_mouse(display)
         if model is None or point is None:
             self.readout.setText("")
             return
@@ -272,6 +352,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if options.lines_per_nc != self.scene.lines_per_nc:
             self.scene.lines_per_nc = options.lines_per_nc
             self.request_lines(animate=False)
+        self.schedule_fields()
         self.plotter.render()
 
     # --- language -------------------------------------------------------
@@ -279,6 +360,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_language(self, language: str) -> None:
         strings.set_language(language)
         self.retranslate()
+        self.schedule_fields()  # the colour bar titles
 
     def retranslate(self) -> None:
         self.setWindowTitle(tr("window_title"))
@@ -286,7 +368,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hint.setText(tr("hint_2d" if self.scene.planar else "hint_3d"))
 
     def closeEvent(self, event) -> None:
-        self.animation.stop()
+        self.closed = True
+        for timer in (self.animation, self._retrace_timer, self._fields_timer):
+            timer.stop()
+        self._executor.shutdown(wait=False, cancel_futures=True)
         self.handles.clear()
         self.plotter.close()
         super().closeEvent(event)

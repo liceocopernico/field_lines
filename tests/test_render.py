@@ -54,3 +54,21 @@ def test_truncated_lines_end_exactly_at_the_limit():
     starts = np.array([line.points[0] for line in lines])
     distances = np.linalg.norm(mesh.points[:, None, :] - starts[None], axis=2).min(axis=1)
     assert distances.max() == pytest.approx(0.03, rel=1e-3)  # radial lines: arc length = distance
+
+
+def test_translucent_equipotential_surfaces_render_in_3d(plotter):
+    from field_lines import sampling
+    from field_lines.sampling import Exclusion
+
+    scene = Scene()
+    presets.load(scene, "dipole")
+    view = SceneView(plotter)
+    view.set_planar(False)
+    exclusions = [Exclusion(c.position, 0.005) for c in scene.charges]
+    mesh, levels = sampling.equipotentials(scene.model(), planar=False, count=5, exclusions=exclusions)
+    before = plotter.screenshot(return_img=True).astype(int)
+    view.set_equipotentials(mesh, planar=False)
+    plotter.render()
+    after = plotter.screenshot(return_img=True).astype(int)
+    assert "equipotentials" in plotter.actors
+    assert (np.abs(after - before).sum(axis=2) > 30).sum() > 1000  # the surfaces tint the view
