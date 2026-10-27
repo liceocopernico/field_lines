@@ -64,3 +64,20 @@ def test_every_string_has_every_language():
     for key, texts in STRINGS.items():
         assert set(texts) == set(LANGUAGES), key
         assert all(texts.values()), key
+
+
+def test_lines_of_neutral_setups_close_and_of_charged_ones_go_to_infinity():
+    scene = Scene()
+    for key, end in (("dipole", "sink"), ("quadrupole", "sink"), ("single", "bounds")):
+        presets.load(scene, key)
+        assert {line.end for line in scene.lines()} == {end}, key
+
+
+def test_off_screen_parts_of_a_line_take_no_growth_time():
+    from field_lines.tracing import FieldLine
+    from field_lines.view import shown_length
+
+    points = np.array([[0.0, 0, 0], [0.05, 0, 0], [3.0, 0, 0], [3.0, 1.0, 0], [0.0, 0.05, 0], [0.0, 0.01, 0]])
+    s = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
+    shown = shown_length(FieldLine(points, s, np.ones(len(points)), "plate"))
+    np.testing.assert_allclose(shown, [0, 0.05, 0.05, 0.05, 0.05, 0.09])

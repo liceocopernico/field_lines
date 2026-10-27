@@ -7,7 +7,7 @@ from scipy.sparse.linalg import cg
 from field_lines import conductors, presets
 from field_lines.conductors import ConductorSolution
 from field_lines.scene import Scene
-from field_lines.units import EPS0
+from field_lines.units import EPS0, K
 
 L = 0.10  # plate side
 
@@ -88,8 +88,11 @@ def test_octant_matches_a_solve_of_the_whole_grid():
     A = conductors._laplacian(axes)
     fixed = np.zeros(shape, dtype=bool)
     fixed[[0, -1], :, :] = fixed[:, [0, -1], :] = fixed[:, :, [0, -1]] = True
-    V = np.zeros(shape)
     u, v, w = axes
+    # the box at the potentials the octant solve gave it, mirrored (odd across the midplane)
+    nodes = np.stack(np.meshgrid(u, v, w, indexing="ij"), axis=-1)[fixed]
+    V = np.zeros(shape)
+    V[fixed] = np.sign(nodes[:, 2]) * octant.interpolator(np.abs(nodes))[:, 0]
     on_plate = (np.abs(u) <= width / 2 + 1e-12)[:, None] & (np.abs(v) <= height / 2 + 1e-12)[None, :]
     for sign in (1, -1):
         k = int(np.argmin(np.abs(w - sign * d / 2)))
@@ -167,3 +170,33 @@ def test_lines_run_from_plate_surface_to_plate_surface():
     # near the edges the gap lines bulge outwards (fringing) instead of running straight across
     outermost = max(inner, key=lambda line: abs(line.points[0, 1]))
     assert np.abs(outermost.points[:, 1]).max() > cap.width / 2
+
+
+def test_the_field_carries_on_smoothly_outside_the_box(grid):
+    """Outside the grid's box the field is that of the plates' charges, which also set the box's potential."""
+    solution = ConductorSolution(grid, 1.0, "z")
+    end = grid.axes[0][-1]
+    inside = np.array([[0.999 * end, 0.02, 0.05], [0.03, 0.04, 0.999 * end]])
+    outside = inside * np.array([[1.002 / 0.999, 1, 1], [1, 1, 1.002 / 0.999]])
+    np.testing.assert_allclose(solution.potential(outside), solution.potential(inside), rtol=0.03)
+    np.testing.assert_allclose(solution.field(outside), solution.field(inside), rtol=0.1, atol=2e-3)
+    # far away: the field of a dipole, Q d along the axis
+    far = solution.field(np.array([[0.0, 0.0, 5.0]]))[0]
+    dipole = 2 * K * solution.charge * grid.separation / 5.0**3
+    assert far[2] == pytest.approx(dipole, rel=0.05)
+
+
+@pytest.mark.parametrize("planar", [True, False])
+@pytest.mark.parametrize("model", ["sigma", "conductor"])
+def test_every_line_from_the_positive_plate_ends_on_the_negative_plate(planar, model):
+    scene = Scene()
+    scene.planar = planar
+    presets.load(scene, "capacitor")
+    cap = scene.capacitor
+    cap.model = model
+    if model == "conductor":
+        grid = conductors.solve(cap.width, cap.height, cap.separation)
+        scene.conductor = ConductorSolution(grid, cap.voltage, cap.normal)
+    lines = scene.lines()
+    assert lines
+    assert all(line.end == "plate" for line in lines)

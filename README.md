@@ -80,8 +80,15 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
   uses).
 - The step is proportional to the distance from the nearest point charge,
   and it is halved where a line bends sharply.
+- Lines are followed far outside the view, up to 100 m, with steps that
+  grow with the distance. A line leaving a capacitor's outer face can make
+  a loop metres wide before it comes back to the negative plate; this way
+  every line of a neutral setup (capacitor, dipole, quadrupole) ends on a
+  negative source. Only setups with a net charge send lines to infinity.
+- The growth animation skips the parts of a line outside the view: a line
+  leaves the screen and reappears where it comes back.
 - A line stops at an opposite charge or plate, at a null point (where it
-  turns back on itself), or when it leaves the box.
+  turns back on itself), or 100 m away.
 
 **Uniform-σ plates.** E and V of a uniformly charged rectangle come from
 their closed-form integrals, not from summing many small charges. In the
@@ -93,15 +100,22 @@ is solved on a grid. Only one octant is solved:
 - the potential is odd across the midplane between the plates and even
   across the other two central planes;
 - the grid is fine (at least 10 cells across the gap) near the plates and
-  grows towards a grounded box 3 plate sides away;
-- the system is solved in finite volumes by conjugate gradients.
+  grows towards a box 3 plate sides away;
+- the system is solved in finite volumes by conjugate gradients;
+- the capacitor is alone in empty space. The box is held at the potential
+  the plates' own charges make there, found by solving once with the box at
+  0 V and once more with the box at the potential of the charges found.
+  Outside the box, the field is the field of those charges, so lines can
+  loop far out and come back.
+- Next to a plate, E is taken from V on that side of the plate only, so it
+  points the right way on both faces.
 
 The charge of each plate cell is ε₀ times the flux of E out of it. From
 that the panel shows Q, C = Q/ΔV (larger than ε₀A/d because of fringing)
 and σ, which is larger at the edges.
 
-A 10 cm × 10 cm capacitor 3 cm apart solves in about half a second. Smaller
-gaps need a finer grid. Below about d/L = 0.08 the panel raises d to the
+A 10 cm × 10 cm capacitor 3 cm apart solves in under a second. Smaller
+gaps need a finer grid and take up to about 10 s. Below about d/L = 0.08 the panel raises d to the
 smallest gap the grid can handle and says so. In this model the point
 charges do not take part.
 

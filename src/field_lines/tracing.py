@@ -3,7 +3,9 @@
 The lines follow the unit vector of E (or of -E for lines traced backwards),
 so the integration parameter is the arc length s. The step is proportional
 to the distance from the nearest point charge and is halved where the line
-turns sharply. A line stops when it
+turns sharply; far from the origin it may grow up to step_far times the
+distance, so that a line can make a loop metres wide and come back in a few
+hundred steps. A line stops when it
 
 - comes within r_stop of a point charge ("sink"),
 - crosses a plate whose charge has the opposite sign, or comes within
@@ -49,6 +51,7 @@ def trace(
     charges: Sequence[PointCharge] = (),
     plates: Sequence[Plate] = (),
     plate_margin: float | None = None,
+    step_far: float = 0.0,
     max_steps: int = 3000,
 ) -> list[FieldLine]:
     """Trace one line from each seed, along E (direction +1) or against it (-1).
@@ -82,7 +85,8 @@ def trace(
         p = pos[idx]
         sg = sign[idx]
         k1 = _direction(E[idx], sg)
-        h = np.clip(STEP_PER_DISTANCE * _nearest_charge(p, charge_pos), step_min, step_max)
+        step_top = np.maximum(step_max, step_far * np.linalg.norm(p, axis=1))
+        h = np.clip(STEP_PER_DISTANCE * _nearest_charge(p, charge_pos), step_min, step_top)
         h = np.minimum(h, 2 * h_prev[idx])
         p_new = _adaptive_rk4(model, p, k1, h, sg, step_min)
 

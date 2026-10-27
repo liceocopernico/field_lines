@@ -36,15 +36,26 @@ def _percentile_range(values: np.ndarray) -> tuple[float, float]:
     return (float(lo), float(max(hi, 1.01 * lo)))
 
 
-def truncated_lines(lines: Sequence[FieldLine], limits: np.ndarray) -> pv.PolyData:
-    """All lines in one PolyData, each cut at arc length limits[i] (inf: whole line)."""
+SHOWN_HALF = 1.5 * VIEW_HALF  # line pieces beyond this are off screen
+
+
+def shown_length(line: FieldLine) -> np.ndarray:
+    """Arc length along the line counting only what lies near the view (so off-screen loops take no time)."""
+    middles = (line.points[1:] + line.points[:-1]) / 2
+    near = np.all(np.abs(middles) <= SHOWN_HALF, axis=1)
+    return np.concatenate(([0.0], np.cumsum(np.diff(line.s) * near)))
+
+
+def truncated_lines(lines: Sequence[FieldLine], limits: np.ndarray, lengths: Sequence[np.ndarray] | None = None):
+    """All lines in one PolyData, each cut at limits[i] (inf: whole line) along lengths[i] (default: s)."""
     points, strengths, cells = [], [], []
     offset = 0
-    for line, limit in zip(lines, limits):
-        k = int(np.searchsorted(line.s, limit, side="right"))
+    lengths = [line.s for line in lines] if lengths is None else lengths
+    for line, limit, s in zip(lines, limits, lengths):
+        k = int(np.searchsorted(s, limit, side="right"))
         pts, mags = line.points[:k], line.strength[:k]
-        if 0 < k < len(line.s):  # end exactly at the limit, between two samples
-            t = (limit - line.s[k - 1]) / (line.s[k] - line.s[k - 1])
+        if 0 < k < len(s):  # end exactly at the limit, between two samples
+            t = (limit - s[k - 1]) / (s[k] - s[k - 1])
             pts = np.vstack((pts, line.points[k - 1] + t * (line.points[k] - line.points[k - 1])))
             mags = np.append(mags, line.strength[k - 1] + t * (line.strength[k] - line.strength[k - 1]))
         if len(pts) < 2:
@@ -64,6 +75,7 @@ class SceneView:
     def __init__(self, plotter: pv.Plotter):
         self.pl = plotter
         self.lines: list[FieldLine] = []
+        self.lengths: list[np.ndarray] = []  # shown_length of each line, which the growth follows
         self.line_mesh = pv.PolyData()
         self.line_actor = None
         self.plate_actors: list = []
@@ -77,15 +89,17 @@ class SceneView:
 
     @property
     def max_length(self) -> float:
-        return max((line.length for line in self.lines), default=0.0)
+        """How far the growth has to go for every line to be complete."""
+        return max((s[-1] for s in self.lengths), default=0.0)
 
     def set_lines(self, lines: list[FieldLine]) -> None:
         self.lines = lines
+        self.lengths = [shown_length(line) for line in lines]
 
     def show_lines(self, limits: np.ndarray | float = np.inf) -> None:
         """Draw the lines, each up to its arc length limit."""
         limits = np.broadcast_to(np.asarray(limits, dtype=float), (len(self.lines),))
-        mesh = truncated_lines(self.lines, limits)
+        mesh = truncated_lines(self.lines, limits, self.lengths)
         if mesh.n_points == 0:
             if self.line_actor is not None:
                 self.line_actor.visibility = False
@@ -116,9 +130,13 @@ class SceneView:
             self.line_actor.visibility = visible and self.line_mesh.n_points > 0
 
     def _clim(self) -> tuple[float, float]:
+        """The colour range of |E| over the parts of the lines that can be seen."""
         if not self.lines:
             return (1.0, 10.0)
-        return _percentile_range(np.concatenate([line.strength for line in self.lines]))
+        strengths = np.concatenate([line.strength for line in self.lines])
+        points = np.concatenate([line.points for line in self.lines])
+        near = np.all(np.abs(points) <= SHOWN_HALF, axis=1)
+        return _percentile_range(strengths[near] if near.any() else strengths)
 
     def set_equipotentials(self, mesh: pv.PolyData | None, planar: bool) -> None:
         """Equipotential lines (2D) or translucent surfaces (3D); None removes them."""

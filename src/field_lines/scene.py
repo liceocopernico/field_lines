@@ -12,12 +12,16 @@ from field_lines.tracing import FieldLine, trace
 from field_lines.units import CM, EPS0, NC, UC_PER_M2
 
 VIEW_HALF = 10 * CM  # the view shows the cube |x|, |y|, |z| <= VIEW_HALF
-BOUNDS_HALF = 1.5 * VIEW_HALF  # lines stop beyond this
+# Lines are followed far outside the view: a line leaving a capacitor's outer face makes a loop
+# that can be metres wide before it comes back to the negative plate. Far away the step grows
+# with the distance, so such a loop takes a few hundred steps.
+TRACE_HALF = 100.0  # m
+STEP_FAR = 0.05  # step / distance from the origin, far away
 STEP_MAX = 2 * VIEW_HALF / 150
 SEED_RADIUS = 0.35 * CM  # lines start this far from a point charge (inside its sphere) ...
 STOP_RADIUS = 0.25 * CM  # ... and end this close to one
 PLATE_OFFSET = 0.1 * CM  # lines start this far from a plate
-MAX_LENGTH = 1.0  # m
+MAX_LENGTH = 10 * TRACE_HALF
 
 
 def charge_radius(q: float) -> float:
@@ -147,10 +151,11 @@ class Scene:
             directions,
             charges=charges,
             plates=plates,
-            bounds=(np.full(3, -BOUNDS_HALF), np.full(3, BOUNDS_HALF)),
+            bounds=(np.full(3, -TRACE_HALF), np.full(3, TRACE_HALF)),
             step_max=STEP_MAX,
             r_stop=STOP_RADIUS,
             max_length=MAX_LENGTH,
+            step_far=STEP_FAR,
         )
         return [start_on_plate(line, plates) for line in lines]
 

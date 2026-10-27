@@ -7,8 +7,13 @@ solved:
 
 - w = 0 is the plane halfway between the plates: V = 0 there;
 - u = 0 and v = 0 are mirror planes: no field crosses them;
-- the box around everything is grounded (V = 0), BOX_MARGIN plate sides away;
-- the positive plate is a one-node-thick layer at V = +1/2 (for ΔV = 1 V).
+- the positive plate is a one-node-thick layer at V = +1/2 (for ΔV = 1 V);
+- the box around everything, BOX_MARGIN plate sides away, is held at the
+  potential that the plates' charges would make in empty space. Those
+  charges are not known in advance: the box starts at V = 0, and is updated
+  from the charges found a few times (OPEN_BOUNDARY_PASSES). So the capacitor
+  is alone in space, and outside the box its field is the field of those
+  charges, which is where field lines go when they loop far out.
 
 The grid is rectilinear: uniform and fine (spacing h) over the plate and the
 gap and a little beyond the edges, then growing geometrically towards the
@@ -33,13 +38,15 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.sparse.linalg import cg
 
 from field_lines.sources import AXES
-from field_lines.units import EPS0
+from field_lines.units import EPS0, K
 
 CELLS_IN_GAP = 10  # at least, across the whole gap
 CELLS_ON_SIDE = 40  # at least, across a whole plate side
 GROWTH = 1.12  # ratio of neighbouring cells outside the fine region
-BOX_MARGIN = 3.0  # plate sides between the plates and the grounded box
-MAX_UNKNOWNS = 600_000  # about 7 s at most
+BOX_MARGIN = 3.0  # plate sides between the plates and the box
+OPEN_BOUNDARY_PASSES = 1  # one update is enough: C then changes by less than 1e-5
+FAR_BLOCKS = 12  # outside the box the quarter plate's charges are merged into at most 12 x 12 blocks
+MAX_UNKNOWNS = 600_000  # about 10 s at most
 TOLERANCE = 1e-6  # C does not change in its first 5 digits from 1e-8
 
 
@@ -101,6 +108,8 @@ class OctantGrid:
     capacitance: float  # F
     sigma: np.ndarray  # charge density on the plate nodes of a quarter plate, C/m² for 1 V
     plate_nodes: tuple[int, int, int]  # (ip, jp, kp): the plate's edge nodes along u and v, its layer along w
+    charge_positions: np.ndarray  # (n, 3) local positions of the node charges of both whole plates
+    charges: np.ndarray  # (n,) their charges for 1 V, C
 
     def __post_init__(self):
         self.interpolator = RegularGridInterpolator(self.axes, self.values, bounds_error=False, fill_value=0.0)
@@ -133,21 +142,31 @@ def solve(width: float, height: float, separation: float, refine: float = 1.0) -
     kp = int(np.searchsorted(w, separation / 2 - 1e-12))
 
     A = _laplacian(axes)
-    fixed = np.zeros(shape, dtype=bool)
-    fixed[-1, :, :] = fixed[:, -1, :] = fixed[:, :, -1] = fixed[:, :, 0] = True  # grounded box, midplane
+    box = np.zeros(shape, dtype=bool)
+    box[-1, :, :] = box[:, -1, :] = box[:, :, -1] = True
+    box[:, :, 0] = False  # the midplane stays at V = 0
+    fixed = box.copy()
+    fixed[:, :, 0] = True
     fixed[: ip + 1, : jp + 1, kp] = True
     V = np.zeros(shape)
     V[: ip + 1, : jp + 1, kp] = 0.5
     free = ~fixed.ravel()
     A_free = A[free][:, free].tocsr()
-    rhs = -(A[free][:, ~free] @ V.ravel()[~free])
+    A_fixed = A[free][:, ~free].tocsr()
     jacobi = sparse.diags(1 / A_free.diagonal())
-    x, info = cg(A_free, rhs, rtol=TOLERANCE, maxiter=10 * sum(shape), M=jacobi)
-    if info != 0:
-        raise RuntimeError(f"the Laplace solver did not converge (cg info {info})")
-    V.ravel()[free] = x
+    box_points = np.stack(np.meshgrid(u, v, w, indexing="ij"), axis=-1)[box]
+    x = None
+    for passes_left in range(OPEN_BOUNDARY_PASSES, -1, -1):
+        rhs = -(A_fixed @ V.ravel()[~free])
+        x, info = cg(A_free, rhs, x0=x, rtol=TOLERANCE, maxiter=10 * sum(shape), M=jacobi)
+        if info != 0:
+            raise RuntimeError(f"the Laplace solver did not converge (cg info {info})")
+        V.ravel()[free] = x
+        node_charge = EPS0 * (A @ V.ravel()).reshape(shape)[: ip + 1, : jp + 1, kp]
+        positions, charges = _whole_plates(*_blocks(u[: ip + 1], v[: jp + 1], node_charge), w[kp])
+        if passes_left:
+            V[box] = potential_of_charges(box_points, positions, charges)
 
-    node_charge = EPS0 * (A @ V.ravel()).reshape(shape)[: ip + 1, : jp + 1, kp]
     charge = 4 * node_charge.sum()  # the octant holds a quarter of the positive plate
     cell_u, cell_v = _cell_widths(u)[: ip + 1], _cell_widths(v)[: jp + 1]
     sigma = node_charge / np.outer(cell_u, cell_v)
@@ -157,8 +176,69 @@ def solve(width: float, height: float, separation: float, refine: float = 1.0) -
     values = np.stack((V, Eu, Ev, Ew), axis=-1)
     h = spacing(width, height, separation, refine)
     return OctantGrid(
-        width, height, separation, h, axes, values, capacitance=charge, sigma=sigma, plate_nodes=(ip, jp, kp)
+        width,
+        height,
+        separation,
+        h,
+        axes,
+        values,
+        capacitance=charge,
+        sigma=sigma,
+        plate_nodes=(ip, jp, kp),
+        charge_positions=positions,
+        charges=charges,
     )
+
+
+def _blocks(u: np.ndarray, v: np.ndarray, node_charge: np.ndarray):
+    """The quarter plate's node charges merged into at most FAR_BLOCKS x FAR_BLOCKS blocks.
+
+    Each block's charge sits at the block's centre of charge, which keeps its
+    charge and its dipole moment: seen from the box, three plate sides away,
+    that is all that matters.
+    """
+    bu, bv, q = [], [], []
+    for rows in np.array_split(np.arange(len(u)), min(FAR_BLOCKS, len(u))):
+        for cols in np.array_split(np.arange(len(v)), min(FAR_BLOCKS, len(v))):
+            block = node_charge[np.ix_(rows, cols)]
+            total = block.sum()
+            bu.append((block.sum(axis=1) @ u[rows]) / total)
+            bv.append((block.sum(axis=0) @ v[cols]) / total)
+            q.append(total)
+    return np.array(bu), np.array(bv), np.array(q)
+
+
+def _whole_plates(u: np.ndarray, v: np.ndarray, charge: np.ndarray, w_plate: float):
+    """Charges of a quarter plate at (u, v), mirrored into both whole plates (the - plate with -q).
+
+    A charge on a mirror plane is the octant's share of its cell, so its two
+    mirror images together make the whole charge.
+    """
+    positions, charges = [], []
+    for su in (1, -1):
+        for sv in (1, -1):
+            for sw in (1, -1):
+                positions.append(np.column_stack((su * u, sv * v, np.full(len(u), sw * w_plate))))
+                charges.append(sw * charge)
+    return np.concatenate(positions), np.concatenate(charges)
+
+
+def potential_of_charges(points: np.ndarray, positions: np.ndarray, charges: np.ndarray) -> np.ndarray:
+    """V of point charges in empty space, in chunks of points to bound memory."""
+    V = np.empty(len(points))
+    for start in range(0, len(points), 256):
+        r = points[start : start + 256, None, :] - positions[None, :, :]
+        V[start : start + 256] = K * (charges / np.linalg.norm(r, axis=2)).sum(axis=1)
+    return V
+
+
+def field_of_charges(points: np.ndarray, positions: np.ndarray, charges: np.ndarray) -> np.ndarray:
+    E = np.empty((len(points), 3))
+    for start in range(0, len(points), 256):
+        r = points[start : start + 256, None, :] - positions[None, :, :]
+        d = np.linalg.norm(r, axis=2)
+        E[start : start + 256] = K * np.einsum("mn,mnk->mk", charges / d**3, r)
+    return E
 
 
 def _cell_gradient(axes, V: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -232,20 +312,32 @@ class ConductorSolution:
         """Charge of the positive plate (the plate at +d/2 along the normal), C."""
         return self.grid.capacitance * self.voltage
 
-    def _octant(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """The points folded into the octant, and the signs that unfold them."""
+    def _split(self, points: np.ndarray):
+        """Local coordinates, and which points lie outside the grid's box (there: the plates' charges)."""
         local = points[:, self.local_axes]
-        return np.abs(local), np.where(local < 0, -1.0, 1.0)
+        box_end = np.array([axis[-1] for axis in self.grid.axes])
+        return local, np.any(np.abs(local) > box_end, axis=1)
 
     def potential(self, points: np.ndarray) -> np.ndarray:
-        octant, signs = self._octant(points)
-        return signs[:, 2] * self.grid.interpolator(octant)[:, 0] * self.voltage
+        local, outside = self._split(points)
+        V = np.empty(len(points))
+        inside = ~outside
+        octant, sw = np.abs(local[inside]), np.where(local[inside, 2] < 0, -1.0, 1.0)
+        V[inside] = sw * self.grid.interpolator(octant)[:, 0]
+        V[outside] = potential_of_charges(local[outside], self.grid.charge_positions, self.grid.charges)
+        return V * self.voltage
 
     def field(self, points: np.ndarray) -> np.ndarray:
-        octant, signs = self._octant(points)
-        values = self.grid.evaluate(octant) * self.voltage
-        su, sv, sw = signs.T
-        local = np.column_stack((sw * su * values[:, 1], sw * sv * values[:, 2], values[:, 3]))
-        out = np.empty_like(local)
-        out[:, self.local_axes] = local
+        local, outside = self._split(points)
+        E = np.empty_like(local)
+        inside = ~outside
+        octant = np.abs(local[inside])
+        su, sv, sw = np.where(local[inside] < 0, -1.0, 1.0).T
+        values = self.grid.evaluate(octant)
+        E[inside] = np.column_stack((sw * su * values[:, 1], sw * sv * values[:, 2], values[:, 3]))
+        E[outside] = field_of_charges(local[outside], self.grid.charge_positions, self.grid.charges)
+        E[local[:, 0] == 0, 0] = 0.0  # no field across the mirror planes, by symmetry
+        E[local[:, 1] == 0, 1] = 0.0
+        out = np.empty_like(E)
+        out[:, self.local_axes] = E * self.voltage
         return out
