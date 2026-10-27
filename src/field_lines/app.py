@@ -176,9 +176,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.panel.set_charges(self.scene.charges, enabled=charges_enabled)
         self.panel.set_capacitor(self.scene.capacitor)
         self.handles.set_charges(self.scene.active_charges())
-        self.view.set_plates(self.scene.plates())
+        self.show_plates()
         self._update_readouts()
         self.request_lines(animate)
+
+    def show_plates(self) -> None:
+        """The plates, coloured by their surface charge density if the panel asks for it."""
+        densities = self.scene.plate_densities() if self.panel.view_options().plate_sigma else None
+        self.view.set_plates(self.scene.plates(), densities, self.scene.planar)
 
     def request_lines(self, animate: bool) -> None:
         """Trace the lines again, once the current Qt events are handled (many requests, one trace)."""
@@ -456,6 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _views_edited(self) -> None:
         options = self.panel.view_options()
         self.view.set_lines_visible(options.lines)
+        self.show_plates()
         if options.lines_per_nc != self.scene.lines_per_nc:
             self.scene.lines_per_nc = options.lines_per_nc
             self.request_lines(animate=False)
@@ -468,6 +474,7 @@ class MainWindow(QtWidgets.QMainWindow):
         strings.set_language(language)
         self.retranslate()
         self._update_readouts()
+        self.show_plates()  # the colour bar title
         self.schedule_fields()  # the colour bar titles
 
     def retranslate(self) -> None:

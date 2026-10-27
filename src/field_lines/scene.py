@@ -54,6 +54,23 @@ class Capacitor:
         ]
 
 
+@dataclass
+class PlateDensity:
+    """Surface charge density over a plate's two faces, on a grid of its local (u, v) coordinates."""
+
+    plate: Plate
+    u: np.ndarray  # along the plate's width
+    v: np.ndarray  # along its height
+    inner: np.ndarray  # (len(u), len(v)) σ on the face towards the other plate, C/m²
+    outer: np.ndarray  # σ on the face away from it
+
+    def at(self, u: float, v: float) -> tuple[float, float]:
+        """σ of the inner and outer face at a point of the plate (nearest grid node)."""
+        i = int(np.argmin(np.abs(self.u - u)))
+        j = int(np.argmin(np.abs(self.v - v)))
+        return float(self.inner[i, j]), float(self.outer[i, j])
+
+
 class Scene:
     def __init__(self):
         self.charges: list[PointCharge] = []
@@ -79,6 +96,30 @@ class Scene:
                 return self.capacitor.plates(EPS0 * self.capacitor.voltage / self.capacitor.separation)
             return self.capacitor.plates(self.conductor.charge / self.capacitor.area)
         return self.capacitor.plates()
+
+    def plate_densities(self) -> list[PlateDensity] | None:
+        """σ over both plates: uniform in the σ model, from the solution in the conductor model.
+
+        A uniformly charged sheet has no faces: both get the sheet's σ. A
+        conductor carries its charge on its surface, each face with ε₀ times
+        the field just outside it. None while the conductor model is computed.
+        """
+        if self.capacitor is None or (self.uses_conductor and self.conductor is None):
+            return None
+        densities = []
+        for plate in self.plates():
+            a, b = plate.width / 2, plate.height / 2
+            if not self.uses_conductor:
+                same = np.full((2, 2), plate.sigma)
+                densities.append(PlateDensity(plate, np.array([-a, a]), np.array([-b, b]), same, same.copy()))
+                continue
+            grid = self.conductor.grid
+            ip, jp, _ = grid.plate_nodes
+            u, v = grid.axes[0][: ip + 1], grid.axes[1][: jp + 1]
+            sign = np.sign(plate.sigma) * self.conductor.voltage
+            inner, outer = (_mirror(face) * sign for face in grid.sigma_faces)
+            densities.append(PlateDensity(plate, _mirror_axis(u), _mirror_axis(v), inner, outer))
+        return densities
 
     def capacitor_readouts(self) -> dict[str, float] | None:
         """E at the centre, ΔV between the plates' centres, Q, C, and the ideal (infinite plates) values."""
@@ -158,6 +199,17 @@ class Scene:
             step_far=STEP_FAR,
         )
         return [start_on_plate(line, plates) for line in lines]
+
+
+def _mirror_axis(x: np.ndarray) -> np.ndarray:
+    """Coordinates 0..a mirrored to -a..a."""
+    return np.concatenate((-x[:0:-1], x))
+
+
+def _mirror(quarter: np.ndarray) -> np.ndarray:
+    """Values on a quarter plate (u, v >= 0) mirrored over the whole plate."""
+    half = np.concatenate((quarter[:0:-1], quarter), axis=0)
+    return np.concatenate((half[:, :0:-1], half), axis=1)
 
 
 def start_on_plate(line: FieldLine, plates: list[Plate]) -> FieldLine:

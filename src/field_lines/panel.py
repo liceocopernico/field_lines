@@ -26,6 +26,7 @@ class ViewOptions:
     slice_quantity: str = "V"  # "V" or "E"
     slice_axis: str = "z"
     slice_position: float = 0.0  # m
+    plate_sigma: bool = False  # colour the capacitor's plates by their surface charge density
 
 
 def _emit(signal) -> Callable[..., None]:
@@ -176,6 +177,10 @@ class Panel(QtWidgets.QWidget):
         for box in (self.width_box, self.height_box, self.separation_box, self.sigma_box, self.voltage_box):
             box.valueChanged.connect(_emit(self.capacitor_changed))
         self.model_combo.currentIndexChanged.connect(self._model_changed)
+        self.plate_sigma_box = QtWidgets.QCheckBox()
+        self._text(self.plate_sigma_box.setText, "plate_sigma")
+        self.plate_sigma_box.toggled.connect(_emit(self.views_changed))
+        form.addRow(self.plate_sigma_box)
         self.readouts: dict[str, QtWidgets.QLabel] = {}
         for key in ("readout_E_center", "readout_E_ideal", "readout_dV", "readout_Q", "readout_C", "readout_C_ideal"):
             value = QtWidgets.QLabel("—")
@@ -399,4 +404,5 @@ class Panel(QtWidgets.QWidget):
             slice_quantity=self.slice_quantity.currentData(),
             slice_axis=self.slice_axis.currentData(),
             slice_position=self.slice_position.value() / (SLICE_STEPS / 2) * VIEW_HALF,
+            plate_sigma=self.plate_sigma_box.isChecked(),
         )

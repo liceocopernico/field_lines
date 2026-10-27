@@ -200,3 +200,28 @@ def test_every_line_from_the_positive_plate_ends_on_the_negative_plate(planar, m
     lines = scene.lines()
     assert lines
     assert all(line.end == "plate" for line in lines)
+
+
+def test_charge_density_on_each_face(grid):
+    inner, outer = grid.sigma_faces * 500.0  # C/m² at 500 V
+    assert inner[0, 0] == pytest.approx(EPS0 * 500 / 0.03, rel=0.01)  # the gap field: σ = ε₀ E = ε₀ ΔV/d
+    assert 0 < outer[0, 0] < 0.5 * inner[0, 0]  # little charge on the outer face...
+    assert outer[-1, 0] > 3 * outer[0, 0]  # ...and most of it near the edges
+    assert inner[-1, 0] > inner[0, 0]
+    # the two faces together are the whole charge of each node (away from the rim)
+    np.testing.assert_allclose((inner + outer)[:-1, :-1], 500.0 * grid.sigma[:-1, :-1], rtol=1e-9)
+
+
+def test_plate_densities_of_the_conductor_model(grid):
+    scene = Scene()
+    presets.load(scene, "capacitor")
+    scene.capacitor.model = "conductor"
+    assert scene.plate_densities() is None  # still being computed
+    scene.conductor = ConductorSolution(grid, scene.capacitor.voltage, "z")
+    plus, minus = scene.plate_densities()
+    assert plus.plate.sigma > 0 > minus.plate.sigma
+    np.testing.assert_array_equal(minus.inner, -plus.inner)
+    np.testing.assert_array_equal(plus.inner, plus.inner[::-1, ::-1])  # mirrored over the whole plate
+    assert plus.u[0] == -plus.u[-1] == pytest.approx(-scene.capacitor.width / 2)
+    centre_inner, centre_outer = plus.at(0.0, 0.0)
+    assert centre_inner > centre_outer > 0

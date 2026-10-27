@@ -33,7 +33,8 @@ The panel on the right holds:
 - **Setup:** ready-made setups.
 - **Point charges:** a table of q (nC) and x, y, z (cm), plus buttons to add
   or remove charges.
-- **Capacitor:** plate size, separation d, the model, and σ or ΔV.
+- **Capacitor:** plate size, separation d, the model, σ or ΔV, and an option
+  to colour the plates by their surface charge density (red +, blue −).
 - **Show:** field lines (lines per nC), equipotentials (number of levels),
   arrows, and the coloured plane (V or |E|, its axis and position).
 - **Animation:** replay the growth of the lines, and set its speed.
@@ -113,6 +114,12 @@ is solved on a grid. Only one octant is solved:
 The charge of each plate cell is ε₀ times the flux of E out of it. From
 that the panel shows Q, C = Q/ΔV (larger than ε₀A/d because of fringing)
 and σ, which is larger at the edges.
+
+Coloured by density, a conductor shows its two faces separately, each with
+σ = ε₀ E just outside it. The inner faces carry σ = ε₀ΔV/d in the middle,
+the outer faces much less, and both crowd towards the edges. In 3D both
+faces of each plate are coloured; in 2D the plate's cut through the plane
+is drawn as two strips, inner and outer. A uniform-σ plate is one colour.
 
 A 10 cm × 10 cm capacitor 3 cm apart solves in under a second. Smaller
 gaps need a finer grid and take up to about 10 s. Below about d/L = 0.08 the panel raises d to the

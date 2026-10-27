@@ -7,10 +7,11 @@ import pyvista as pv
 from matplotlib import colormaps
 from matplotlib.colors import ListedColormap
 
-from field_lines.scene import VIEW_HALF
-from field_lines.sources import Plate
+from field_lines.scene import VIEW_HALF, PlateDensity
+from field_lines.sources import AXES, Plate
 from field_lines.strings import LANGUAGES, STRINGS, tr
 from field_lines.tracing import FieldLine
+from field_lines.units import UC_PER_M2
 
 BACKGROUND = "white"
 POSITIVE_COLOR = (0.85, 0.12, 0.12)
@@ -19,6 +20,8 @@ OUTLINE_COLOR = (0.8, 0.8, 0.8)
 EQUIPOTENTIAL_COLOR = (0.1, 0.55, 0.25)
 V_CMAP = "RdBu_r"  # red for positive potentials, blue for negative, like the charges
 PLATE_THICKNESS = 0.0015  # m, only for drawing
+FACE_STRIP = 0.002  # m: in 2D each face of a cut plate is drawn as a strip this wide
+SIGMA_BAR = dict(vertical=False, position_x=0.3, position_y=0.02, width=0.4, height=0.1, fmt="%.2g")
 # plasma without its palest yellow, which vanishes on white
 LINE_CMAP = ListedColormap(colormaps["plasma"](np.linspace(0.0, 0.85, 256)))
 
@@ -69,6 +72,57 @@ def truncated_lines(lines: Sequence[FieldLine], limits: np.ndarray, lengths: Seq
     mesh = pv.PolyData(np.concatenate(points), lines=np.concatenate(cells))
     mesh.point_data["E"] = np.maximum(np.concatenate(strengths), 1e-30)
     return mesh
+
+
+def _inner_side(plate: Plate) -> float:
+    """-1 if the plate's inner face (towards the other plate) is on its local -w side, else +1."""
+    return -1.0 if plate.center[AXES.index(plate.normal)] > 0 else 1.0
+
+
+def _sheet(plate: Plate, local: np.ndarray, sigma: np.ndarray) -> pv.StructuredGrid:
+    """A surface through local points of shape (nu, nv, 3), with σ (C/m²) shown in μC/m²."""
+    points = plate.from_local(local.reshape(-1, 3)) + plate.center
+    x, y, z = (points[:, k].reshape(local.shape[:2]) for k in range(3))
+    mesh = pv.StructuredGrid(x, y, z)
+    mesh.point_data["sigma"] = sigma.ravel(order="F") / UC_PER_M2
+    return mesh
+
+
+def face_sheets(density: PlateDensity) -> list[pv.StructuredGrid]:
+    """3D: the plate's two faces, a little apart, each coloured by its own σ."""
+    uu, vv = np.meshgrid(density.u, density.v, indexing="ij")
+    inner = _inner_side(density.plate)
+    sheets = []
+    for side, sigma in ((inner, density.inner), (-inner, density.outer)):
+        local = np.stack((uu, vv, np.full(uu.shape, side * PLATE_THICKNESS / 2)), axis=-1)
+        sheets.append(_sheet(density.plate, local, sigma))
+    return sheets
+
+
+def face_strips(density: PlateDensity) -> list[pv.StructuredGrid]:
+    """2D: where the plate crosses the z = 0 plane, a strip on each side of it coloured by that face's σ."""
+    plate = density.plate
+    z_axis = plate.local_axes.index(2)
+    if z_axis == 2:
+        return []  # a plate lying in the plane is not cut by it
+    cut = -plate.center[2]
+    if z_axis == 1:  # the plate runs along u in the plane
+        along = density.u
+        j = int(np.argmin(np.abs(density.v - cut)))
+        faces = density.inner[:, j], density.outer[:, j]
+    else:
+        along = density.v
+        i = int(np.argmin(np.abs(density.u - cut)))
+        faces = density.inner[i, :], density.outer[i, :]
+    inner = _inner_side(plate)
+    strips = []
+    for side, sigma in ((inner, faces[0]), (-inner, faces[1])):
+        across = np.array([0.0, side * FACE_STRIP])
+        a, w = np.meshgrid(along, across, indexing="ij")
+        c = np.full(a.shape, cut)
+        local = np.stack((a, c, w) if z_axis == 1 else (c, a, w), axis=-1)
+        strips.append(_sheet(plate, local, np.repeat(sigma[:, None], 2, axis=1)))
+    return strips
 
 
 class SceneView:
@@ -192,10 +246,19 @@ class SceneView:
             mesh, name="slice", lighting=False, pickable=True, reset_camera=False, **style
         )
 
-    def set_plates(self, plates: Sequence[Plate]) -> None:
+    def set_plates(
+        self, plates: Sequence[Plate], densities: Sequence[PlateDensity] | None = None, planar: bool = False
+    ) -> None:
+        """The plates: plain red and blue, or each face coloured by its surface charge density."""
         for actor in self.plate_actors:
             self.pl.remove_actor(actor, render=False)
         self.plate_actors = []
+        for language in LANGUAGES:  # removing the actors leaves their colour bar behind
+            if STRINGS["bar_sigma"][language] in self.pl.scalar_bars:
+                self.pl.remove_scalar_bar(STRINGS["bar_sigma"][language], render=False)
+        if densities:
+            self._coloured_plates(densities, planar)
+            return
         for plate in plates:
             half = np.array([plate.width / 2, plate.height / 2, PLATE_THICKNESS / 2])
             lo = plate.from_local(-half[None])[0] + plate.center
@@ -205,6 +268,26 @@ class SceneView:
                 pv.Box(bounds), color=sign_color(plate.sigma), opacity=0.6, pickable=False, reset_camera=False
             )
             self.plate_actors.append(actor)
+
+    def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool) -> None:
+        values = np.concatenate([np.concatenate((d.inner.ravel(), d.outer.ravel())) for d in densities])
+        limit = float(np.percentile(np.abs(values), 95)) / UC_PER_M2 or 1.0  # the edges may saturate
+        for density in densities:
+            meshes = face_strips(density) if planar else face_sheets(density)
+            for mesh in meshes:
+                actor = self.pl.add_mesh(
+                    mesh,
+                    scalars="sigma",
+                    cmap=V_CMAP,
+                    clim=(-limit, limit),
+                    lighting=not planar,
+                    pickable=False,
+                    reset_camera=False,
+                    scalar_bar_args=SIGMA_BAR | dict(title=tr("bar_sigma")),
+                )
+                self.plate_actors.append(actor)
+        # the labels below the bar, so that they do not run into the title above it
+        self.pl.scalar_bars[tr("bar_sigma")].SetTextPositionToPrecedeScalarBar()
 
     def set_planar(self, planar: bool) -> None:
         """2D: look down the z axis with a parallel camera that pans instead of rotating."""

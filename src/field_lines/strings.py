@@ -40,6 +40,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "model_conductor": {"it": "Conduttori a ΔV fissata (Laplace)", "en": "Conductors at fixed ΔV (Laplace)"},
     "sigma": {"it": "Densità σ", "en": "Density σ"},
     "voltage": {"it": "Differenza di potenziale ΔV", "en": "Potential difference ΔV"},
+    "plate_sigma": {"it": "Colora le armature con la densità σ", "en": "Colour the plates by their density σ"},
     "readout_E_center": {"it": "E al centro", "en": "E at the centre"},
     "readout_E_ideal": {"it": "σ/ε₀ con σ = Q/A", "en": "σ/ε₀ with σ = Q/A"},
     "readout_dV": {"it": "ΔV tra i centri", "en": "ΔV between the centres"},
@@ -83,6 +84,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "bar_E": {"it": "E [V/m]", "en": "E [V/m]"},
     "bar_V": {"it": "V [V]", "en": "V [V]"},
     "bar_slice_E": {"it": "E sul piano [V/m]", "en": "E on the plane [V/m]"},
+    "bar_sigma": {"it": "densità di carica [μC/m²]", "en": "charge density [μC/m²]"},  # VTK's font has no σ
 }
 
 _language = "it"

@@ -275,3 +275,16 @@ def test_reading_the_camera_does_not_move_it(window):
         before = window.plotter.renderer.GetActiveCamera().GetPosition()
         window.plotter.camera.up  # PyVista resets a camera it thinks was never placed
         assert window.plotter.renderer.GetActiveCamera().GetPosition() == before
+
+
+def test_colouring_the_plates_by_density(window):
+    window.load_preset("capacitor")
+    assert len(window.view.plate_actors) == 2
+    window.panel.plate_sigma_box.setChecked(True)
+    assert len(window.view.plate_actors) == 4
+    assert tr("bar_sigma") in window.plotter.scalar_bars
+    window.panel.language_combo.setCurrentIndex(window.panel.language_combo.findData("en"))
+    assert "charge density [μC/m²]" in window.plotter.scalar_bars
+    window.panel.plate_sigma_box.setChecked(False)
+    assert len(window.view.plate_actors) == 2
+    assert not any("density" in title or "densità" in title for title in window.plotter.scalar_bars.keys())

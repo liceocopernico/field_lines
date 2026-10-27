@@ -107,6 +107,7 @@ class OctantGrid:
     values: np.ndarray  # (nu, nv, nw, 4): V, Eu, Ev, Ew
     capacitance: float  # F
     sigma: np.ndarray  # charge density on the plate nodes of a quarter plate, C/m² for 1 V
+    sigma_faces: np.ndarray  # (2, ...) the same split into the inner face (towards the gap) and the outer face
     plate_nodes: tuple[int, int, int]  # (ip, jp, kp): the plate's edge nodes along u and v, its layer along w
     charge_positions: np.ndarray  # (n, 3) local positions of the node charges of both whole plates
     charges: np.ndarray  # (n,) their charges for 1 V, C
@@ -170,6 +171,11 @@ def solve(width: float, height: float, separation: float, refine: float = 1.0) -
     charge = 4 * node_charge.sum()  # the octant holds a quarter of the positive plate
     cell_u, cell_v = _cell_widths(u)[: ip + 1], _cell_widths(v)[: jp + 1]
     sigma = node_charge / np.outer(cell_u, cell_v)
+    # each face's share: ε₀ times the flux of E through that face of the node's cell, per area
+    # (sigma also counts the flux out of the plate's rim at the edge nodes)
+    plate = V[: ip + 1, : jp + 1, kp]
+    inner = EPS0 * (plate - V[: ip + 1, : jp + 1, kp - 1]) / (w[kp] - w[kp - 1])
+    outer = EPS0 * (plate - V[: ip + 1, : jp + 1, kp + 1]) / (w[kp + 1] - w[kp])
 
     Eu, Ev, Ew = (-g for g in np.gradient(V, u, v, w))
     Eu[0], Ev[:, 0] = 0.0, 0.0  # exactly, by symmetry (np.gradient is one-sided there)
@@ -184,6 +190,7 @@ def solve(width: float, height: float, separation: float, refine: float = 1.0) -
         values,
         capacitance=charge,
         sigma=sigma,
+        sigma_faces=np.stack((inner, outer)),
         plate_nodes=(ip, jp, kp),
         charge_positions=positions,
         charges=charges,

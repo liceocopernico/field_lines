@@ -81,3 +81,13 @@ def test_off_screen_parts_of_a_line_take_no_growth_time():
     s = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
     shown = shown_length(FieldLine(points, s, np.ones(len(points)), "plate"))
     np.testing.assert_allclose(shown, [0, 0.05, 0.05, 0.05, 0.05, 0.09])
+
+
+def test_plate_densities_of_the_sigma_model_are_uniform():
+    scene = Scene()
+    presets.load(scene, "capacitor")
+    plus, minus = scene.plate_densities()
+    assert plus.at(0.01, -0.02) == (scene.capacitor.sigma, scene.capacitor.sigma)
+    assert minus.at(0.0, 0.0) == (-scene.capacitor.sigma, -scene.capacitor.sigma)
+    presets.load(scene, "dipole")
+    assert scene.plate_densities() is None
