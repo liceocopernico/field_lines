@@ -158,7 +158,7 @@ class SceneView:
                     self.pl.remove_scalar_bar(title, render=False)
         if mesh is None:
             return
-        bar = dict(vertical=True, position_x=0.88, position_y=0.25, fmt="%.2g")
+        bar = dict(vertical=True, position_x=0.82, position_y=0.25, fmt="%.2g")
         if quantity == "V":
             limit = float(np.percentile(np.abs(mesh["V"]), 95)) or 1.0
             style = dict(scalars="V", cmap=V_CMAP, clim=(-limit, limit), scalar_bar_args=bar | dict(title=tr("bar_V")))
