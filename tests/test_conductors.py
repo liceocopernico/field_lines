@@ -136,3 +136,34 @@ def test_conductor_capacitor_in_2d_keeps_lines_in_the_plane():
     readouts = scene.capacitor_readouts()
     assert readouts["dV"] == pytest.approx(cap.voltage)
     assert readouts["C"] > readouts["C_ideal"]
+
+
+def test_field_next_to_the_plates_points_the_right_way(grid):
+    """A central difference across the one-node plate would make E point back at it from outside."""
+    solution = ConductorSolution(grid, 500.0, "z")
+    across = np.linspace(-0.049, 0.049, 40)
+    for z, expected_sign in ((0.0155, 1), (0.0145, -1), (-0.0145, -1), (-0.0155, 1)):
+        # just outside the + plate E points up, away from it; between the plates down; outside - up into it
+        points = np.column_stack((across, np.zeros(40), np.full(40, z)))
+        Ez = solution.field(points)[:, 2]
+        assert np.all(np.sign(Ez) == expected_sign), z
+    centre = solution.field(np.array([[0.0, 0.0, 0.0145]]))[0, 2]
+    assert centre == pytest.approx(-500 / 0.03, rel=0.01)  # the full gap field, right up to the plate
+
+
+def test_lines_run_from_plate_surface_to_plate_surface():
+    scene = Scene()
+    scene.planar = True
+    presets.load(scene, "capacitor")
+    cap = scene.capacitor
+    cap.model = "conductor"
+    scene.conductor = ConductorSolution(conductors.solve(cap.width, cap.height, cap.separation), cap.voltage, cap.normal)
+    lines = scene.lines()
+    for line in lines:
+        assert line.points[0, 0] == pytest.approx(cap.separation / 2)  # on the + plate (normal x)
+        if line.end == "plate":
+            assert line.points[-1, 0] == pytest.approx(-cap.separation / 2)
+    inner = [line for line in lines if line.points[1, 0] < cap.separation / 2]
+    # near the edges the gap lines bulge outwards (fringing) instead of running straight across
+    outermost = max(inner, key=lambda line: abs(line.points[0, 1]))
+    assert np.abs(outermost.points[:, 1]).max() > cap.width / 2

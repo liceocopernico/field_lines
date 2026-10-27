@@ -134,14 +134,14 @@ class Scene:
             plates,
             lines_per_nc=self.lines_per_nc,
             charge_radius=SEED_RADIUS,
-            plate_offset=self.plate_offset(),
+            plate_offset=PLATE_OFFSET,
             planar=self.planar,
         )
         if self.click_seeds:
             clicks = np.array(self.click_seeds)
             points = np.concatenate((points, clicks, clicks))
             directions = np.concatenate((directions, np.ones(len(clicks)), -np.ones(len(clicks))))
-        return trace(
+        lines = trace(
             model,
             points,
             directions,
@@ -151,16 +151,24 @@ class Scene:
             step_max=STEP_MAX,
             r_stop=STOP_RADIUS,
             max_length=MAX_LENGTH,
-            plate_margin=self.plate_margin(),
         )
+        return [start_on_plate(line, plates) for line in lines]
 
-    def plate_margin(self) -> float | None:
-        """How close a line may come to a plate it ends on: on the grid, E is smeared over a cell."""
-        if self.uses_conductor and self.conductor is not None:
-            return 1.5 * self.conductor.spacing
-        return None
 
-    def plate_offset(self) -> float:
-        if self.uses_conductor and self.conductor is not None:
-            return max(PLATE_OFFSET, 1.5 * self.conductor.spacing)
-        return PLATE_OFFSET
+def start_on_plate(line: FieldLine, plates: list[Plate]) -> FieldLine:
+    """A line seeded just off a plate, drawn from the plate's surface itself."""
+    first = line.points[:1]
+    for plate in plates:
+        local = plate.to_local(first)[0]
+        on_face = abs(local[2]) <= 1.001 * PLATE_OFFSET
+        if on_face and abs(local[0]) <= plate.width / 2 and abs(local[1]) <= plate.height / 2:
+            local[2] = 0.0
+            surface = plate.from_local(local[None])[0] + plate.center
+            step = np.linalg.norm(line.points[0] - surface)
+            return FieldLine(
+                np.vstack((surface, line.points)),
+                np.concatenate(([0.0], line.s + step)),
+                np.concatenate((line.strength[:1], line.strength)),
+                line.end,
+            )
+    return line

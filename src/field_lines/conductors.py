@@ -17,6 +17,11 @@ volumes, as a sum over the grid's edges of (face area / edge length) times
 the squared difference of V; on the mirror planes the cells are half cells.
 The matrix is symmetric and is solved by conjugate gradients. The charge of
 a plate node is ε₀ (A V) there: ε₀ times the flux of E out of its cell.
+
+E = -∇V is taken on the nodes by central differences and interpolated, except
+in the cells next to a plate: there a central difference would mix the strong
+field on one side of the plate with the weak field on the other, so E is the
+gradient of V interpolated inside that cell, one-sided by construction.
 """
 
 import math
@@ -95,9 +100,25 @@ class OctantGrid:
     values: np.ndarray  # (nu, nv, nw, 4): V, Eu, Ev, Ew
     capacitance: float  # F
     sigma: np.ndarray  # charge density on the plate nodes of a quarter plate, C/m² for 1 V
+    plate_nodes: tuple[int, int, int]  # (ip, jp, kp): the plate's edge nodes along u and v, its layer along w
 
     def __post_init__(self):
         self.interpolator = RegularGridInterpolator(self.axes, self.values, bounds_error=False, fill_value=0.0)
+        u, v, w = self.axes
+        ip, jp, kp = self.plate_nodes
+        self._near_plate = (u[ip + 1], v[jp + 1], w[kp - 1], w[kp + 1])
+
+    def evaluate(self, points: np.ndarray) -> np.ndarray:
+        """V, Eu, Ev, Ew for 1 V at octant points (u, v, w >= 0)."""
+        values = self.interpolator(points)
+        u_max, v_max, w_lo, w_hi = self._near_plate
+        u, v, w = points.T
+        near = (u < u_max) & (v < v_max) & (w > w_lo) & (w < w_hi)
+        if near.any():
+            values[near, 1:] = -_cell_gradient(self.axes, self.values[..., 0], points[near])
+        values[u == 0, 1] = 0.0  # no field across the mirror planes, by symmetry
+        values[v == 0, 2] = 0.0
+        return values
 
 
 def solve(width: float, height: float, separation: float, refine: float = 1.0) -> OctantGrid:
@@ -135,7 +156,38 @@ def solve(width: float, height: float, separation: float, refine: float = 1.0) -
     Eu[0], Ev[:, 0] = 0.0, 0.0  # exactly, by symmetry (np.gradient is one-sided there)
     values = np.stack((V, Eu, Ev, Ew), axis=-1)
     h = spacing(width, height, separation, refine)
-    return OctantGrid(width, height, separation, h, axes, values, capacitance=charge, sigma=sigma)
+    return OctantGrid(
+        width, height, separation, h, axes, values, capacitance=charge, sigma=sigma, plate_nodes=(ip, jp, kp)
+    )
+
+
+def _cell_gradient(axes, V: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """∇ of the trilinear interpolation of V, inside the cell that holds each point."""
+    index, t, size = [], [], []
+    for axis, x in enumerate(axes):
+        i = np.clip(np.searchsorted(x, points[:, axis]) - 1, 0, len(x) - 2)
+        dx = x[i + 1] - x[i]
+        index.append(i)
+        t.append(np.clip((points[:, axis] - x[i]) / dx, 0.0, 1.0))
+        size.append(dx)
+    i, j, k = index
+
+    def corner(a, b, c):
+        return V[i + a, j + b, k + c]
+
+    tu, tv, tw = t
+    grad = np.empty((len(points), 3))
+    # along u: the difference across the cell, blended over v and w; likewise for v and w
+    grad[:, 0] = sum(
+        (corner(1, b, c) - corner(0, b, c)) * (tv if b else 1 - tv) * (tw if c else 1 - tw) for b in (0, 1) for c in (0, 1)
+    ) / size[0]
+    grad[:, 1] = sum(
+        (corner(a, 1, c) - corner(a, 0, c)) * (tu if a else 1 - tu) * (tw if c else 1 - tw) for a in (0, 1) for c in (0, 1)
+    ) / size[1]
+    grad[:, 2] = sum(
+        (corner(a, b, 1) - corner(a, b, 0)) * (tu if a else 1 - tu) * (tv if b else 1 - tv) for a in (0, 1) for b in (0, 1)
+    ) / size[2]
+    return grad
 
 
 def _cell_widths(x: np.ndarray) -> np.ndarray:
@@ -180,18 +232,18 @@ class ConductorSolution:
         """Charge of the positive plate (the plate at +d/2 along the normal), C."""
         return self.grid.capacitance * self.voltage
 
-    def _octant(self, points: np.ndarray):
+    def _octant(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The points folded into the octant, and the signs that unfold them."""
         local = points[:, self.local_axes]
-        signs = np.where(local < 0, -1.0, 1.0)
-        values = self.grid.interpolator(np.abs(local)) * self.voltage
-        return signs, values
+        return np.abs(local), np.where(local < 0, -1.0, 1.0)
 
     def potential(self, points: np.ndarray) -> np.ndarray:
-        signs, values = self._octant(points)
-        return signs[:, 2] * values[:, 0]
+        octant, signs = self._octant(points)
+        return signs[:, 2] * self.grid.interpolator(octant)[:, 0] * self.voltage
 
     def field(self, points: np.ndarray) -> np.ndarray:
-        signs, values = self._octant(points)
+        octant, signs = self._octant(points)
+        values = self.grid.evaluate(octant) * self.voltage
         su, sv, sw = signs.T
         local = np.column_stack((sw * su * values[:, 1], sw * sv * values[:, 2], values[:, 3]))
         out = np.empty_like(local)
