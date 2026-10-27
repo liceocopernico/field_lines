@@ -22,6 +22,35 @@ In both, the capacitor's E, ΔV, Q and C are read out, and the field can be
 shown as field lines, equipotential surfaces (lines in 2D), an arrow grid,
 and a movable plane coloured by V or |E|.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/dipole-3d.webp" alt="A dipole's field lines in 3D"><br>
+      A dipole in 3D: the lines leave the + charge and end on the − one.</td>
+    <td width="50%"><img src="docs/screenshots/quadrupole-2d.webp" alt="A quadrupole in the plane with equipotentials and arrows"><br>
+      A quadrupole in the 2D plane, with equipotentials and field arrows.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/capacitor-3d.webp" alt="A parallel plate capacitor in the conductors model"><br>
+      Parallel plates held at ΔV = 500 V: their faces coloured by the solved charge density.</td>
+    <td><img src="docs/screenshots/disc-2d.webp" alt="Circular plates with the plane coloured by the potential"><br>
+      Circular plates with uniform σ, cut by the plane, which is coloured by V.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/cylinder-3d.webp" alt="A cylindrical capacitor in 3D"><br>
+      A cylindrical capacitor: two coaxial tubes of finite length.</td>
+    <td><img src="docs/screenshots/cylinder-2d-across.webp" alt="The cylindrical capacitor cut across its axis"><br>
+      Cut across its axis: a radial field and circular equipotentials.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/cylinder-2d-along.webp" alt="The cylindrical capacitor cut along its axis, with a grounded sphere"><br>
+      Cut along its axis, with a grounded sphere in the gap: the field leaks out of the open ends.</td>
+    <td><img src="docs/screenshots/spheres-3d.webp" alt="Two metal spheres at opposite potentials"><br>
+      Two metal spheres at ±1000 V, coloured by their surface charge density.</td>
+  </tr>
+</table>
+
 ## Run
 
 ```bash
