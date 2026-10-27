@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from PySide6 import QtCore
 
 from field_lines.interaction import to_display
@@ -140,3 +141,42 @@ def test_click_on_the_plane_in_3d_seeds_a_line_and_reads_out(window, qtbot):
     window._clicked(tuple(display))
     assert len(window.scene.click_seeds) == 1
     np.testing.assert_allclose(window.scene.click_seeds[0], [0.0, 0.04, 0.0], atol=1e-3)
+
+
+def test_capacitor_preset_shows_plates_and_readouts(window):
+    window.load_preset("capacitor")
+    window._retrace()
+    assert len(window.view.plate_actors) == 2
+    texts = {key: label.text() for key, label in window.panel.readouts.items()}
+    assert texts["readout_Q"] == "2.00 nC"
+    assert texts["readout_E_ideal"] == "22.6 kV/m"  # σ/ε₀ with σ = 0.2 μC/m²
+    assert texts["readout_C_ideal"] == "2.95 pF"
+
+
+def test_conductor_model_is_solved_in_the_background(window, qtbot):
+    window.load_preset("capacitor")
+    window.panel.model_combo.setCurrentIndex(window.panel.model_combo.findData("conductor"))
+    assert window.scene.uses_conductor
+    assert window.scene.conductor is None
+    assert window.panel.capacitor_status.text() == tr("computing")
+    assert not window.panel.table.isEnabled()  # point charges do not take part in this model
+    window._solve_timer.setInterval(0)
+    window._solve_timer.start()
+    qtbot.waitUntil(lambda: window.scene.conductor is not None, timeout=20000)
+    window._retrace()
+    assert window.panel.capacitor_status.text() == ""
+    assert window.panel.readouts["readout_dV"].text() == "500 V"
+    assert window.panel.readouts["readout_C"].text() == "5.43 pF"
+    assert all(line.end in ("plate", "bounds") for line in window.view.lines)
+    # a new ΔV needs no new solve
+    window.panel.voltage_box.setValue(1000)
+    assert window.scene.conductor is not None and window.scene.conductor.voltage == 1000
+
+
+def test_too_small_a_gap_is_clamped_in_the_conductor_model(window):
+    window.load_preset("capacitor")
+    window.panel.model_combo.setCurrentIndex(window.panel.model_combo.findData("conductor"))
+    window.panel.separation_box.setValue(0.2)
+    assert window.scene.capacitor.separation >= 0.0076
+    assert window.panel.separation_box.value() == pytest.approx(window.scene.capacitor.separation * 100)
+    assert "0.8 cm" in window.panel.capacitor_status.text().replace(",", ".")

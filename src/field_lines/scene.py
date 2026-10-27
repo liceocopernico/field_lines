@@ -9,7 +9,7 @@ import numpy as np
 from field_lines import seeding
 from field_lines.sources import AXES, FieldModel, Plate, PointCharge, Superposition
 from field_lines.tracing import FieldLine, trace
-from field_lines.units import CM, NC, UC_PER_M2
+from field_lines.units import CM, EPS0, NC, UC_PER_M2
 
 VIEW_HALF = 10 * CM  # the view shows the cube |x|, |y|, |z| <= VIEW_HALF
 BOUNDS_HALF = 1.5 * VIEW_HALF  # lines stop beyond this
@@ -71,10 +71,35 @@ class Scene:
         if self.capacitor is None:
             return []
         if self.uses_conductor:
-            if self.conductor is None:
-                return []
+            if self.conductor is None:  # still being computed: the ideal capacitor's density
+                return self.capacitor.plates(EPS0 * self.capacitor.voltage / self.capacitor.separation)
             return self.capacitor.plates(self.conductor.charge / self.capacitor.area)
         return self.capacitor.plates()
+
+    def capacitor_readouts(self) -> dict[str, float] | None:
+        """E at the centre, ΔV between the plates' centres, Q, C, and the ideal (infinite plates) values."""
+        cap = self.capacitor
+        model = self.model()
+        if cap is None or model is None:
+            return None
+        plus, minus = cap.plates()
+        E_center = float(np.linalg.norm(model.field(np.zeros((1, 3)))[0]))
+        V = model.potential(np.array([plus.center, minus.center]))
+        dV = float(V[0] - V[1])
+        if self.uses_conductor:
+            Q = self.conductor.charge
+            C = self.conductor.capacitance
+        else:
+            Q = cap.sigma * cap.area
+            C = Q / dV if dV else math.nan
+        return dict(
+            E_center=E_center,
+            E_ideal=abs(Q) / cap.area / EPS0,
+            dV=dV,
+            Q=Q,
+            C=C,
+            C_ideal=EPS0 * cap.area / cap.separation,
+        )
 
     def model(self) -> FieldModel | None:
         """The field of the scene, or None while the conductor model is being computed."""
@@ -126,7 +151,14 @@ class Scene:
             step_max=STEP_MAX,
             r_stop=STOP_RADIUS,
             max_length=MAX_LENGTH,
+            plate_margin=self.plate_margin(),
         )
+
+    def plate_margin(self) -> float | None:
+        """How close a line may come to a plate it ends on: on the grid, E is smeared over a cell."""
+        if self.uses_conductor and self.conductor is not None:
+            return 1.5 * self.conductor.spacing
+        return None
 
     def plate_offset(self) -> float:
         if self.uses_conductor and self.conductor is not None:

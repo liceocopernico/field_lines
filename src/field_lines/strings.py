@@ -41,7 +41,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "sigma": {"it": "Densità σ", "en": "Density σ"},
     "voltage": {"it": "Differenza di potenziale ΔV", "en": "Potential difference ΔV"},
     "readout_E_center": {"it": "E al centro", "en": "E at the centre"},
-    "readout_E_ideal": {"it": "σ/ε₀ (armature infinite)", "en": "σ/ε₀ (infinite plates)"},
+    "readout_E_ideal": {"it": "σ/ε₀ con σ = Q/A", "en": "σ/ε₀ with σ = Q/A"},
     "readout_dV": {"it": "ΔV tra i centri", "en": "ΔV between the centres"},
     "readout_Q": {"it": "Carica Q", "en": "Charge Q"},
     "readout_C": {"it": "Capacità C", "en": "Capacitance C"},

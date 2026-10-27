@@ -103,7 +103,7 @@ class SceneView:
                 line_width=4,
                 pickable=False,
                 reset_camera=False,
-                scalar_bar_args=dict(title=tr("bar_E"), vertical=True, position_x=0.02, position_y=0.25, fmt="%.0e"),
+                scalar_bar_args=dict(title=tr("bar_E"), vertical=True, position_x=0.02, position_y=0.25, fmt="%.2g"),
             )
         else:
             self.line_mesh.copy_from(mesh)
@@ -168,7 +168,7 @@ class SceneView:
                 cmap="viridis",
                 log_scale=True,
                 clim=_percentile_range(mesh["E"]),
-                scalar_bar_args=bar | dict(title=tr("bar_slice_E"), fmt="%.0e"),
+                scalar_bar_args=bar | dict(title=tr("bar_slice_E")),
             )
         self.slice_actor = self.pl.add_mesh(
             mesh, name="slice", lighting=False, pickable=True, reset_camera=False, **style

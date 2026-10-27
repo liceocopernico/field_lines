@@ -6,8 +6,10 @@ to the distance from the nearest point charge and is halved where the line
 turns sharply. A line stops when it
 
 - comes within r_stop of a point charge ("sink"),
-- crosses a plate whose charge has the opposite sign ("plate"),
-- turns back on itself or finds no field, i.e. it reached a null point ("null"),
+- crosses a plate whose charge has the opposite sign, or comes within
+  plate_margin of it ("plate"); near a charged sheet the field flips, and a
+  step across it would stall,
+- turns back on itself, finds no field or stops advancing: it reached a null point ("null"),
 - leaves the bounding box ("bounds") or gets longer than max_length ("length").
 """
 
@@ -46,9 +48,13 @@ def trace(
     max_length: float,
     charges: Sequence[PointCharge] = (),
     plates: Sequence[Plate] = (),
+    plate_margin: float | None = None,
     max_steps: int = 3000,
 ) -> list[FieldLine]:
-    """Trace one line from each seed, along E (direction +1) or against it (-1)."""
+    """Trace one line from each seed, along E (direction +1) or against it (-1).
+
+    plate_margin defaults to the smallest step (r_stop / 2).
+    """
     n = len(seeds)
     if n == 0:
         return []
@@ -56,6 +62,7 @@ def trace(
     charge_pos = np.array([c.position for c in charges]).reshape(-1, 3)
     sign = np.asarray(directions, dtype=float)
     step_min = r_stop / 2
+    margin = step_min if plate_margin is None else plate_margin
 
     pos = np.array(seeds, dtype=float)
     E = model.field(pos)
@@ -87,12 +94,12 @@ def trace(
 
         stop = np.full(idx.size, "", dtype=object)
         forward = np.einsum("ij,ij->i", _direction(E_new, sg), step)
-        stop[(mag_new == 0) | (forward < 0)] = "null"
+        stop[(mag_new == 0) | (forward < 0) | (seg < 1e-6 * step_min)] = "null"
         stop[np.any((p_new < lo) | (p_new > hi), axis=1)] = "bounds"
         stop[s[idx] + seg >= max_length] = "length"
         for plate in plates:
-            hit, crossing = _plate_crossing(plate, p, p_new, sg)
-            p_new[hit] = crossing[hit]
+            hit, arrival = _plate_hit(plate, p, p_new, sg, margin)
+            p_new[hit] = arrival[hit]
             stop[hit] = "plate"
         stop[_nearest_charge(p_new, charge_pos) < r_stop] = "sink"
 
@@ -141,23 +148,27 @@ def _adaptive_rk4(model, p, k1, h, sign, step_min):
     return p_new
 
 
-def _plate_crossing(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray):
-    """Which steps cross a plate that is a sink for their line, and where."""
+def _plate_hit(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray, margin: float):
+    """Which steps reach a plate that is a sink for their line, and the point where they end on it.
+
+    A step reaches the plate if it crosses it, or ends within margin of it
+    (then the line ends at the nearest point of the plate).
+    """
     a = plate.to_local(p)
     b = plate.to_local(p_new)
     wa, wb = a[:, 2], b[:, 2]
     with np.errstate(invalid="ignore", divide="ignore"):
         t = np.where(wa != wb, wa / (wa - wb), 0.0)
     c = a + t[:, None] * (b - a)
-    hit = (
-        (plate.sigma * sign < 0)
-        & (wa * wb <= 0)
-        & (wa != 0)
-        & (np.abs(c[:, 0]) <= plate.width / 2)
-        & (np.abs(c[:, 1]) <= plate.height / 2)
-    )
-    crossing = p + t[:, None] * (p_new - p)
-    return hit, crossing
+    half = np.array([plate.width / 2, plate.height / 2])
+    sink = plate.sigma * sign < 0
+    crossed = sink & (wa * wb <= 0) & (wa != 0) & np.all(np.abs(c[:, :2]) <= half, axis=1)
+    near = sink & ~crossed & (np.abs(wb) <= margin) & np.all(np.abs(b[:, :2]) <= half + margin, axis=1)
+    arrival_local = np.where(crossed[:, None], c, b)
+    arrival_local[near, 2] = 0.0
+    arrival_local[near, :2] = np.clip(arrival_local[near, :2], -half, half)
+    arrival = plate.from_local(arrival_local) + plate.center
+    return crossed | near, arrival
 
 
 def _assemble(n, record_idx, record_pos, record_mag, end) -> list[FieldLine]:

@@ -1,6 +1,7 @@
 """The main window: wires the panel, the 3D view and the scene together."""
 
 import argparse
+import math
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -10,11 +11,12 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets
 from pyvistaqt import QtInteractor
 
-from field_lines import presets, sampling, strings
+from field_lines import conductors, presets, sampling, strings
+from field_lines.conductors import ConductorSolution
 from field_lines.interaction import ChargeHandles, MouseEvents, charge_under_mouse, mouse_on_plane, pick_on
 from field_lines.panel import Panel, ViewOptions
 from field_lines.sampling import Exclusion
-from field_lines.scene import VIEW_HALF, Scene, charge_radius
+from field_lines.scene import VIEW_HALF, Capacitor, Scene, charge_radius
 from field_lines.sources import PointCharge
 from field_lines.strings import tr
 from field_lines.units import CM, NC, format_quantity
@@ -22,6 +24,7 @@ from field_lines.view import SceneView
 
 FRAME_MS = 33  # growth animation: about 30 frames per second
 FIELDS_DELAY_MS = 120  # equipotentials, arrows and plane are recomputed this long after the last change
+SOLVE_DELAY_MS = 300  # the conductor model is solved this long after the capacitor's last change
 WHEEL_STEP = 0.25 * NC  # charge change per wheel notch
 NEW_CHARGE = 2 * NC
 
@@ -42,6 +45,37 @@ class FieldsWorker(QtCore.QObject):
     """Carries results from the worker thread back to the GUI thread."""
 
     finished = QtCore.Signal(object)
+
+
+class SolverWorker(QtCore.QObject):
+    """Carries a solved conductor model (geometry key, OctantGrid or None) back to the GUI thread."""
+
+    finished = QtCore.Signal(object, object)
+
+
+class PanelScroll(QtWidgets.QScrollArea):
+    """Scrolls the panel up and down, and is always as wide as the panel needs."""
+
+    def __init__(self, panel: QtWidgets.QWidget):
+        super().__init__()
+        self.setWidget(panel)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        panel.installEventFilter(self)
+        self._fit(panel)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QtCore.QEvent.Type.LayoutRequest:  # the panel's content changed size
+            self._fit(watched)
+        return False
+
+    def _fit(self, panel: QtWidgets.QWidget) -> None:
+        extra = self.verticalScrollBar().sizeHint().width() + 2 * self.frameWidth()
+        self.setMinimumWidth(panel.minimumSizeHint().width() + extra)
+
+
+def geometry_key(capacitor: Capacitor) -> tuple[float, float, float]:
+    return (round(capacitor.width, 9), round(capacitor.height, 9), round(capacitor.separation, 9))
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -66,13 +100,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plotter.clear_events_for_key(key)
 
         self.panel = Panel()
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidget(self.panel)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(self.panel.sizeHint().width() + 24)
         dock = QtWidgets.QDockWidget()
         dock.setObjectName("panel")
-        dock.setWidget(scroll)
+        dock.setWidget(PanelScroll(self.panel))
         dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         dock.setTitleBarWidget(QtWidgets.QWidget())
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
@@ -96,6 +126,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shown_generation = -1  # the generation whose views are on screen
         self._fields_timer = QtCore.QTimer(self, singleShot=True, interval=FIELDS_DELAY_MS)
         self._fields_timer.timeout.connect(self._compute_fields)
+        self.solver_worker = SolverWorker(self)
+        self.solver_worker.finished.connect(self._solved)
+        self._solver = ThreadPoolExecutor(max_workers=1)
+        self._solver_future = None
+        self._solutions: dict[tuple[float, float, float], conductors.OctantGrid] = {}
+        self._solve_timer = QtCore.QTimer(self, singleShot=True, interval=SOLVE_DELAY_MS)
+        self._solve_timer.timeout.connect(self._start_solve)
+        self._clamped_to: float | None = None  # separation forced on the conductor model, m
 
         p = self.panel
         p.planar_changed.connect(self.set_planar)
@@ -119,10 +157,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def load_preset(self, key: str) -> None:
         presets.load(self.scene, key)
         self.panel.set_preset(key)
+        self._clamped_to = None
+        self._update_conductor()
         self.refresh(animate=True)
 
     def set_planar(self, planar: bool) -> None:
         self.scene.set_planar(planar)
+        self._update_conductor()  # the capacitor may have turned
         self.panel.set_planar(planar)
         self.view.set_planar(planar)
         self.hint.setText(tr("hint_2d" if planar else "hint_3d"))
@@ -135,6 +176,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.panel.set_capacitor(self.scene.capacitor)
         self.handles.set_charges(self.scene.active_charges())
         self.view.set_plates(self.scene.plates())
+        self._update_readouts()
         self.request_lines(animate)
 
     def request_lines(self, animate: bool) -> None:
@@ -155,6 +197,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plotter.render()
         self._animate_next = False
         self.schedule_fields()
+        self._update_readouts()
 
     # --- equipotentials, arrows, coloured plane -------------------------
 
@@ -341,10 +384,69 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _capacitor_edited(self) -> None:
         normal = self.scene.capacitor.normal if self.scene.capacitor else ("x" if self.scene.planar else "z")
-        self.scene.capacitor = self.panel.capacitor(normal)
-        self.handles.set_charges(self.scene.active_charges())
-        self.view.set_plates(self.scene.plates())
-        self.request_lines(animate=False)
+        capacitor = self.panel.capacitor(normal)
+        self._clamped_to = None
+        if capacitor is not None and capacitor.model == "conductor":
+            smallest = conductors.min_separation(capacitor.width, capacitor.height)
+            if capacitor.separation < smallest:
+                capacitor.separation = math.ceil(smallest / CM * 10) / 10 * CM  # the spin box shows 0.1 cm
+                self._clamped_to = capacitor.separation
+        self.scene.capacitor = capacitor
+        self._update_conductor()
+        self.refresh(animate=False)
+
+    # --- the conductor model ----------------------------------------------
+
+    def _update_conductor(self) -> None:
+        """Give the scene the conductor solution of its capacitor, or start computing it."""
+        capacitor = self.scene.capacitor
+        if not self.scene.uses_conductor:
+            self.scene.conductor = None
+            return
+        grid = self._solutions.get(geometry_key(capacitor))
+        if grid is None:
+            self.scene.conductor = None
+            self._solve_timer.start()
+        else:
+            self.scene.conductor = ConductorSolution(grid, capacitor.voltage, capacitor.normal)
+
+    def _start_solve(self) -> None:
+        if not self.scene.uses_conductor:
+            return
+        key = geometry_key(self.scene.capacitor)
+        if self._solver_future is not None:
+            self._solver_future.cancel()  # a solve for an older geometry that has not started yet
+
+        def job():
+            try:
+                grid = conductors.solve(*key)
+            except Exception:
+                traceback.print_exc()
+                grid = None
+            self.solver_worker.finished.emit(key, grid)
+
+        self._solver_future = self._solver.submit(job)
+
+    def _solved(self, key, grid) -> None:
+        if self.closed or grid is None:
+            return
+        self._solutions[key] = grid
+        if self.scene.uses_conductor and geometry_key(self.scene.capacitor) == key:
+            self._update_conductor()
+            self.refresh(animate=True)
+
+    def _update_readouts(self) -> None:
+        values = self.scene.capacitor_readouts()
+        texts = {}
+        if values is not None:
+            units = dict(E_center="V/m", E_ideal="V/m", dV="V", Q="C", C="F", C_ideal="F")
+            texts = {f"readout_{name}": format_quantity(values[name], unit) for name, unit in units.items()}
+        status = []
+        if self.scene.uses_conductor and self.scene.conductor is None:
+            status.append(tr("computing"))
+        if self._clamped_to is not None:
+            status.append(tr("clamped", d=f"{self._clamped_to / CM:.1f}"))
+        self.panel.set_readouts(texts, " ".join(status))
 
     def _views_edited(self) -> None:
         options = self.panel.view_options()
@@ -360,6 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_language(self, language: str) -> None:
         strings.set_language(language)
         self.retranslate()
+        self._update_readouts()
         self.schedule_fields()  # the colour bar titles
 
     def retranslate(self) -> None:
@@ -369,9 +472,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.closed = True
-        for timer in (self.animation, self._retrace_timer, self._fields_timer):
+        for timer in (self.animation, self._retrace_timer, self._fields_timer, self._solve_timer):
             timer.stop()
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._solver.shutdown(wait=False, cancel_futures=True)
         self.handles.clear()
         self.plotter.close()
         super().closeEvent(event)
