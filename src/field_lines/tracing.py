@@ -8,10 +8,10 @@ distance, so that a line can make a loop metres wide and come back in a few
 hundred steps. A line stops when it
 
 - comes within r_stop of a point charge ("sink"),
-- crosses a plate whose charge has the opposite sign, or comes within
-  plate_margin of it ("plate"); near a charged sheet the field flips, and a
-  step across it would stall. With plates_absorb every plate stops lines
-  (they are conductors, ending the lines that reach them),
+- enters a plate (a sheet or a slab) whose charge has the opposite sign, or
+  comes within plate_margin of it ("plate"); near a charged sheet the field
+  flips, and a step across it would stall. With plates_absorb every plate
+  stops lines (they are conductors, ending the lines that reach them),
 - comes within plate_margin of a metallic sphere ("sphere"),
 - turns back on itself, finds no field or stops advancing: it reached a null point ("null"),
 - leaves the bounding box ("bounds") or gets longer than max_length ("length").
@@ -165,22 +165,32 @@ def _adaptive_rk4(model, p, k1, h, sign, step_min):
 def _plate_hit(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray, margin: float, absorb: bool):
     """Which steps reach a plate that is a sink for their line (any plate, if absorb), and where they end.
 
-    A step reaches the plate if it crosses it, or ends within margin of it
-    (then the line ends at the nearest point of the plate).
+    A step reaches the plate (a sheet, or a slab) if it enters it, or ends
+    within margin of it (then the line ends at the nearest point of the
+    plate's surface).
     """
     a = plate.to_local(p)
     b = plate.to_local(p_new)
-    wa, wb = a[:, 2], b[:, 2]
+    half = plate.half
+    d = b - a
+    # where the step enters and leaves each band |u| <= a, |v| <= b, |w| <= t/2 (slab method)
     with np.errstate(invalid="ignore", divide="ignore"):
-        t = np.where(wa != wb, wa / (wa - wb), 0.0)
-    c = a + t[:, None] * (b - a)
-    half = np.array([plate.width / 2, plate.height / 2])
+        t1, t2 = (-half - a) / d, (half - a) / d
+    still = d == 0  # parallel to a band: inside it all along, or never
+    within = np.abs(a) <= half
+    t_in = np.where(still, np.where(within, -np.inf, np.inf), np.minimum(t1, t2)).max(axis=1)
+    t_out = np.where(still, np.where(within, np.inf, -np.inf), np.maximum(t1, t2)).min(axis=1)
     sink = np.ones(len(p), dtype=bool) if absorb else plate.sigma * sign < 0
-    crossed = sink & (wa * wb <= 0) & (wa != 0) & np.all(np.abs(c[:, :2]) <= half, axis=1)
-    near = sink & ~crossed & (np.abs(wb) <= margin) & np.all(np.abs(b[:, :2]) <= half + margin, axis=1)
-    arrival_local = np.where(crossed[:, None], c, b)
-    arrival_local[near, 2] = 0.0
-    arrival_local[near, :2] = np.clip(arrival_local[near, :2], -half, half)
+    outside = np.any(np.abs(a) > half, axis=1)
+    crossed = sink & outside & (t_in <= t_out) & (t_in >= 0) & (t_in <= 1)
+    near = sink & ~crossed & np.all(np.abs(b) <= half + margin, axis=1)
+    arrival_local = np.where(crossed[:, None], a + np.clip(t_in, 0, 1)[:, None] * d, b)
+    nearest = np.clip(arrival_local[near], -half, half)
+    inside = np.all(nearest == arrival_local[near], axis=1)  # within the slab: out through the nearest face
+    k = np.argmin(half - np.abs(nearest), axis=1)
+    rows = np.flatnonzero(inside)
+    nearest[rows, k[rows]] = np.where(nearest[rows, k[rows]] >= 0, 1.0, -1.0) * half[k[rows]]
+    arrival_local[near] = nearest
     arrival = plate.from_local(arrival_local) + plate.center
     return crossed | near, arrival
 

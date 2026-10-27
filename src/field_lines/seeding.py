@@ -52,36 +52,57 @@ def charge_seeds(charge: PointCharge, n: int, radius: float, planar: bool) -> np
 
 
 def plate_seeds(model: FieldModel, plate: Plate, n: int, offset: float, sign: int, planar: bool) -> np.ndarray:
-    """n points just off the plate's faces, spread in proportion to the flux leaving each face.
+    """n points just off the plate's surface, spread in proportion to the flux leaving each part of it.
 
+    A slab has six faces: the two large ones and four rims across its
+    thickness; each face gets its share of the lines.
     planar: only points on the z = 0 plane (the plate's normal must lie in that plane).
     """
-    a, b = plate.width / 2, plate.height / 2
-    cells_u = np.linspace(-a, a, PLATE_SAMPLES + 1)
-    cells_v = np.linspace(-b, b, PLATE_SAMPLES + 1)
-    u = (cells_u[:-1] + cells_u[1:]) / 2
-    v = (cells_v[:-1] + cells_v[1:]) / 2
-    if planar:
-        z_axis = plate.local_axes.index(2)
-        if z_axis == 2:
-            return np.empty((0, 3))  # a plate lying in the plane: no field line leaves it within the plane
-        fixed = -plate.center[2]
-        if z_axis == 0:
-            u = np.array([fixed])
-        else:
-            v = np.array([fixed])
-    uu, vv = np.meshgrid(u, v, indexing="ij")
+    if planar and plate.local_axes.index(2) == 2:
+        return np.empty((0, 3))  # a plate lying in the plane: no field line leaves it within the plane
     candidates, weights = [], []
-    for face in (1, -1):
-        local = np.column_stack((uu.ravel(), vv.ravel(), np.full(uu.size, face * offset)))
+    for local, normal, measure in _surface_cells(plate, offset, planar):
         points = plate.from_local(local) + plate.center
-        normal = plate.from_local(np.array([[0.0, 0.0, face]]))[0]
-        flux = sign * model.field(points) @ normal
+        flux = sign * model.field(points) @ plate.from_local(normal[None])[0]
         candidates.append(points)
-        weights.append(np.maximum(flux, 0.0))
+        weights.append(np.maximum(flux, 0.0) * measure)
     shares = _shares([w.sum() for w in weights], n)  # each face its share of the lines
     seeds = [_stratified(c, w, k) for c, w, k in zip(candidates, weights, shares)]
     return np.concatenate(seeds)
+
+
+def _surface_cells(plate: Plate, offset: float, planar: bool):
+    """Cells covering the plate's faces, offset outwards: (local centres, local normal, cell area).
+
+    planar: the cells along the plate's cut by the z = 0 plane, with their length for the area.
+    """
+    half = plate.half
+    fixed = None
+    if planar:  # the local axis along z, and the value of that coordinate on the plane
+        fixed = plate.local_axes.index(2), -plate.center[2]
+    spacing = 2 * half[:2].max() / PLATE_SAMPLES
+
+    def samples(axis: int) -> tuple[np.ndarray, float]:
+        """Cell centres along a local axis of the plate, and the cells' size."""
+        if fixed is not None and fixed[0] == axis:
+            return np.array([fixed[1]]), 1.0
+        count = PLATE_SAMPLES if axis < 2 else max(1, round(2 * half[2] / spacing))
+        edges = np.linspace(-half[axis], half[axis], count + 1)
+        return (edges[:-1] + edges[1:]) / 2, 2 * half[axis] / count
+
+    for axis in range(3) if half[2] > 0 else (2,):
+        if fixed is not None and fixed[0] == axis:
+            continue  # the faces across the plane's axis are not cut by the plane
+        others = [k for k in range(3) if k != axis]
+        (s0, d0), (s1, d1) = samples(others[0]), samples(others[1])
+        grid = np.meshgrid(s0, s1, indexing="ij")
+        for side in (1, -1):
+            local = np.empty((grid[0].size, 3))
+            local[:, others[0]], local[:, others[1]] = grid[0].ravel(), grid[1].ravel()
+            local[:, axis] = side * (half[axis] + offset)
+            normal = np.zeros(3)
+            normal[axis] = side
+            yield local, normal, d0 * d1
 
 
 def sphere_seeds(model: FieldModel, center: np.ndarray, radius: float, n: int, offset: float, sign: int, planar: bool):

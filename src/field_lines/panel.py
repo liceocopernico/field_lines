@@ -10,7 +10,7 @@ from field_lines.presets import PRESETS
 from field_lines.scene import VIEW_HALF, Capacitor
 from field_lines.sources import AXES, PointCharge
 from field_lines.strings import LANGUAGES, language, tr
-from field_lines.units import CM, NC, UC_PER_M2
+from field_lines.units import CM, MM, NC, UC_PER_M2
 from field_lines.view import SIGMA_PALETTES, SIGMA_SCALES
 
 COORDINATE_RANGE = VIEW_HALF / CM  # cm
@@ -28,7 +28,7 @@ class ViewOptions:
     slice_quantity: str = "V"  # "V" or "E"
     slice_axis: str = "z"
     slice_position: float = 0.0  # m
-    plate_sigma: bool = False  # colour the capacitor's plates by their surface charge density
+    conductor_sigma: bool = True  # colour the plates and the metallic spheres by their surface charge density
     sigma_scale: str = "symmetric"  # how σ maps to colours: "symmetric", "contrast" or "log"
     sigma_palette: str = "RdBu_r"
 
@@ -197,6 +197,8 @@ class Panel(QtWidgets.QWidget):
         self.width_box = spin_box(1, 20, 0.5, 1, defaults.width / CM)
         self.height_box = spin_box(1, 20, 0.5, 1, defaults.height / CM)
         self.separation_box = spin_box(0.2, 15, 0.1, 1, defaults.separation / CM)
+        self.thickness_box = spin_box(0.5, 10, 0.5, 1, defaults.thickness / MM)
+        self.thickness_box.setSuffix(" mm")
         self.sigma_box = spin_box(-10, 10, 0.05, 2, defaults.sigma / UC_PER_M2)
         self.voltage_box = spin_box(-10000, 10000, 50, 0, defaults.voltage)
         for box in (self.width_box, self.height_box, self.separation_box):
@@ -208,16 +210,20 @@ class Panel(QtWidgets.QWidget):
             ("plate_width", self.width_box),
             ("plate_height", self.height_box),
             ("separation", self.separation_box),
+            ("plate_thickness", self.thickness_box),
         ):
             form.addRow(self._label(key), widget)
         form.addRow(self.sigma_label, self.sigma_box)
         form.addRow(self.voltage_label, self.voltage_box)
-        for box in (self.width_box, self.height_box, self.separation_box, self.sigma_box, self.voltage_box):
+        for box in (
+            self.width_box,
+            self.height_box,
+            self.separation_box,
+            self.thickness_box,
+            self.sigma_box,
+            self.voltage_box,
+        ):
             box.valueChanged.connect(_emit(self.capacitor_changed))
-        self.plate_sigma_box = QtWidgets.QCheckBox()
-        self._text(self.plate_sigma_box.setText, "plate_sigma")
-        self.plate_sigma_box.toggled.connect(_emit(self.views_changed))
-        form.addRow(self.plate_sigma_box)
         self.readouts: dict[str, QtWidgets.QLabel] = {}
         for key in ("readout_E_center", "readout_E_ideal", "readout_dV", "readout_Q", "readout_C", "readout_C_ideal"):
             value = QtWidgets.QLabel("—")
@@ -273,6 +279,10 @@ class Panel(QtWidgets.QWidget):
         form.addRow(self._label("slice_axis"), self.slice_axis)
         form.addRow(self._label("slice_position"), self.slice_position)
         layout.addWidget(self.slice_form)
+        self.conductor_sigma_box = QtWidgets.QCheckBox()
+        self.conductor_sigma_box.setChecked(defaults.conductor_sigma)
+        self._text(self.conductor_sigma_box.setText, "conductor_sigma")
+        layout.addWidget(self.conductor_sigma_box)
         sigma_form = QtWidgets.QFormLayout()
         sigma_form.setContentsMargins(0, 0, 0, 0)
         self.sigma_scale = self._combo([f"scale_{s}" for s in SIGMA_SCALES], SIGMA_SCALES)
@@ -280,7 +290,9 @@ class Panel(QtWidgets.QWidget):
         sigma_form.addRow(self._label("sigma_scale"), self.sigma_scale)
         sigma_form.addRow(self._label("sigma_palette"), self.sigma_palette)
         layout.addLayout(sigma_form)
-        for box in (self.lines_box, self.equipotentials_box, self.arrows_box, self.slice_box):
+        for combo in (self.sigma_scale, self.sigma_palette):  # they only matter with the conductors coloured
+            self.conductor_sigma_box.toggled.connect(combo.setEnabled)
+        for box in (self.lines_box, self.equipotentials_box, self.arrows_box, self.slice_box, self.conductor_sigma_box):
             box.toggled.connect(_emit(self.views_changed))
         for signal in (
             self.lines_per_nc.valueChanged,
@@ -464,14 +476,15 @@ class Panel(QtWidgets.QWidget):
         self.charge_edited.emit(row, *values)
 
     def set_capacitor(self, capacitor: Capacitor | None) -> None:
-        boxes = (self.capacitor_box, self.width_box, self.height_box, self.separation_box, self.sigma_box)
-        blockers = [QtCore.QSignalBlocker(w) for w in (*boxes, self.voltage_box)]
+        boxes = (self.capacitor_box, self.width_box, self.height_box, self.separation_box, self.thickness_box)
+        blockers = [QtCore.QSignalBlocker(w) for w in (*boxes, self.sigma_box, self.voltage_box)]
         self.capacitor_box.setChecked(capacitor is not None)
         self.capacitor_form.setVisible(capacitor is not None)
         if capacitor is not None:
             self.width_box.setValue(capacitor.width / CM)
             self.height_box.setValue(capacitor.height / CM)
             self.separation_box.setValue(capacitor.separation / CM)
+            self.thickness_box.setValue(capacitor.thickness / MM)
             self.sigma_box.setValue(capacitor.sigma / UC_PER_M2)
             self.voltage_box.setValue(capacitor.voltage)
         for blocker in blockers:
@@ -485,6 +498,7 @@ class Panel(QtWidgets.QWidget):
             width=self.width_box.value() * CM,
             height=self.height_box.value() * CM,
             separation=self.separation_box.value() * CM,
+            thickness=self.thickness_box.value() * MM,
             sigma=self.sigma_box.value() * UC_PER_M2,
             voltage=self.voltage_box.value(),
             normal=normal,
@@ -505,7 +519,7 @@ class Panel(QtWidgets.QWidget):
             slice_quantity=self.slice_quantity.currentData(),
             slice_axis=self.slice_axis.currentData(),
             slice_position=self.slice_position.value() / (SLICE_STEPS / 2) * VIEW_HALF,
-            plate_sigma=self.plate_sigma_box.isChecked(),
+            conductor_sigma=self.conductor_sigma_box.isChecked(),
             sigma_scale=self.sigma_scale.currentData(),
             sigma_palette=self.sigma_palette.currentData(),
         )

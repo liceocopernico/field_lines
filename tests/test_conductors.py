@@ -144,12 +144,33 @@ def test_clusters_match_the_panel_by_panel_sum(capacitor):
     assert np.median(error) < 0.01
 
 
+def test_slab_plates_are_closed_conductors():
+    scene = conductor_scene("capacitor")
+    solution = scene.conductor
+    target = np.where(solution.panels.owner == 0, 250.0, -250.0)
+    np.testing.assert_allclose(solution.potential(solution.panels.centers), target, atol=1.0)
+    plus = scene.conductor_plates()[0]
+    assert plus.thickness == scene.capacitor.thickness == 0.002
+    assert np.linalg.norm(solution.field(plus.center[None])[0]) < 0.01 * 500 / 0.03  # no field inside
+    inner, outer = solution.faces[0]
+    c = conductors.PLATE_PANELS // 2
+    assert inner[c, c] == pytest.approx(EPS0 * 500 / 0.03, rel=0.01)  # the inner faces are d apart
+    for name in ("u-", "u+", "v-", "v+"):  # the rims carry charge, more than the outer face's middle
+        assert solution.face(0, name).mean() > 2 * outer[c, c] > 0
+    plus_density = scene.plate_densities()[0]
+    assert plus_density.rim_u.shape == (2, len(plus_density.v))
+    assert plus_density.rim_v.shape == (2, len(plus_density.u))
+
+
 def test_touching_spheres_and_plates():
     plates = Capacitor().plates()
     assert touching(plates, [Sphere([0, 0, 0.0], 0.0145)])  # reaches the plates at ±1.5 cm
     assert not touching(plates, [Sphere([0, 0, 0.0], 0.01)])
     assert touching([], [Sphere([0, 0, 0], 0.02), Sphere([0.03, 0, 0], 0.015)])
     assert not touching(plates, [Sphere([0.09, 0, 0], 0.02)])
+    slabs = Capacitor(separation=0.03, thickness=0.004).slabs()
+    assert touching(slabs, [Sphere([0, 0, 0.03], 0.0105)])  # within 1 mm of the outer face at 1.5 + 0.4 cm
+    assert not touching(slabs, [Sphere([0, 0, 0.03], 0.0095)])
 
 
 @pytest.mark.parametrize("planar", [True, False])
@@ -162,7 +183,7 @@ def test_every_line_ends_on_a_conductor(key, planar):
     assert sum(end in ("plate", "sphere") for end in ends) >= len(ends) - 1  # at most one escapes past 100 m
     for line in lines:  # and every line starts on a conductor's surface
         start = line.points[0]
-        on_plate = any(abs(p.to_local(start[None])[0, 2]) < 1e-9 for p in scene.conductor_plates())
+        on_plate = any(p.distance(start) < 1e-9 for p in scene.conductor_plates())
         on_sphere = any(abs(np.linalg.norm(start - s.center) - s.radius) < 1e-9 for s in scene.spheres)
         assert on_plate or on_sphere
     if planar:

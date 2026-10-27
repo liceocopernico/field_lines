@@ -46,12 +46,15 @@ The panel on the right holds:
 - **Metal spheres** (conductors model): a table of potential V, radius and
   centre (cm), with each sphere's charge Q, plus buttons to add or remove
   spheres.
-- **Capacitor:** plate size, separation d, σ (charges model) or ΔV
-  (conductors model), and an option to colour the plates by their surface
-  charge density (red +, blue −).
+- **Capacitor:** plate size, separation d (the gap between the plates'
+  inner faces), plate thickness (0.5 to 10 mm, 2 mm to start with), σ
+  (charges model) or ΔV (conductors model). Each plate is a closed slab,
+  growing outwards with its thickness.
 - **Show:** field lines (lines per nC), equipotentials (number of levels),
-  arrows, the coloured plane (V or |E|, its axis and position), and how σ
-  is coloured on plates and spheres:
+  arrows, the coloured plane (V or |E|, its axis and position), whether
+  plates and spheres are coloured by their surface charge density (on to
+  start with; off, the plates are plain red and blue and the spheres grey),
+  and how σ is coloured:
   - scale *symmetric*: centred on 0, red + and blue − (with the red-blue
     palette): shows the sign;
   - scale *contrast*: from the smallest to the largest σ shown (2nd to 98th
@@ -133,15 +136,17 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
 **Uniform-σ plates.** E and V of a uniformly charged rectangle come from
 their closed-form integrals, not from summing many small charges. In the
 middle of a large capacitor this gives the textbook σ/ε₀ (checked in the
-tests).
+tests). The charged sheet is the slab's inner face; the slab is drawn
+behind it, and the lines start from and end on the slab's surface.
 
 **Conductors.** Plates and spheres are held at their potentials (the
 plates at ±ΔV/2, each sphere at its V, all with respect to infinity), alone
 in empty space. Their charges are found on their surfaces (boundary
 elements, or the method of moments):
-- each surface is cut into small flat panels with a uniform σ: a plate into
-  25 × 25 panels, finer towards its edges; a sphere into 384 panels, a cube
-  projected onto it;
+- each surface is cut into small flat panels with a uniform σ: a plate is a
+  box, each large face cut into 21 × 21 panels, finer towards its edges,
+  and its four rims into strips across the thickness; a sphere into 384
+  panels, a cube projected onto it;
 - each panel counts with its true shape (the closed-form potential and field
   of a flat polygon). The cube's corners make kite-shaped panels on a
   sphere; counting them as squares had left σ 7% off there. Now an isolated
@@ -160,14 +165,16 @@ background, and the old lines stay meanwhile). Spheres may not touch each
 other or the plates. In this model the point charges do not take part.
 
 From the panels' charges the panel shows Q, C = Q/ΔV (larger than ε₀A/d
-because of fringing) and each sphere's Q. A plate's two faces are told
-apart: each carries σ = ε₀ E just outside it. The inner faces carry
-σ = ε₀ΔV/d in the middle, the outer faces much less, and both crowd towards
-the edges.
+because of fringing, and a little larger with thicker plates, whose rims
+also carry charge) and each sphere's Q. Each face of a plate carries
+σ = ε₀ E just outside it. The inner faces carry σ = ε₀ΔV/d in the middle,
+the outer faces much less, and the charge crowds towards the edges and onto
+the rims.
 
-Coloured by density, a plate shows its two faces separately; in 2D its cut
-through the plane is two strips, inner and outer. A sphere is always
-coloured by its σ: its whole surface in 3D, a ring along its cut in 2D. A
+Coloured by density, a plate shows each of its six faces with its own σ; in
+2D its cut through the plane is a rectangle, its inner half coloured by the
+inner face, its outer half by the outer face, and its ends by the rims. A
+sphere shows its whole surface in 3D, a ring along its cut in 2D. A
 grounded sphere between the plates has no net charge, but is negative on
 the side facing the + plate and positive on the other. A uniform-σ plate is
 one colour.
@@ -175,7 +182,7 @@ one colour.
 **Readouts.**
 - E at the centre.
 - σ/ε₀ with σ = Q/A, the field of infinite plates with the same charge.
-- ΔV between the plates' centres.
+- ΔV between the centres of the plates' inner faces.
 - Q, C, and ε₀A/d.
 
 ## Tests

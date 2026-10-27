@@ -11,6 +11,7 @@ K = 1 / (4 * math.pi * EPS0)  # Coulomb constant, N m²/C²
 
 NC = 1e-9  # one nanocoulomb in C
 CM = 1e-2  # one centimetre in m
+MM = 1e-3  # one millimetre in m
 UC_PER_M2 = 1e-6  # one μC/m² in C/m²
 
 _PREFIXES = [(1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""), (1e-3, "m"), (1e-6, "μ"), (1e-9, "n"), (1e-12, "p")]

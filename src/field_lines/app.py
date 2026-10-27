@@ -255,14 +255,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.request_lines(animate)
 
     def show_plates(self) -> None:
-        """The plates (coloured by σ if the panel asks for it) and the metallic spheres (always by σ)."""
+        """The plates and the metallic spheres, coloured by σ if the panel asks for it."""
         options = self.panel.view_options()
-        densities = self.scene.plate_densities() if options.plate_sigma else None
+        densities = self.scene.plate_densities() if options.conductor_sigma else None
+        spheres = self.scene.sphere_densities()
+        if spheres is not None and not options.conductor_sigma:
+            spheres = [(points, quads, None) for points, quads, _ in spheres]  # plain grey
         self.view.set_plates(
-            self.scene.plates(),
+            self.scene.drawn_plates(),
             densities,
             self.scene.planar,
-            self.scene.sphere_densities(),
+            spheres,
             options.sigma_scale,
             options.sigma_palette,
         )

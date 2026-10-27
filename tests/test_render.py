@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import pyvista as pv
 
 from field_lines import presets
 from field_lines.scene import Capacitor, Scene
@@ -35,13 +36,13 @@ def test_lines_appear_and_grow(plotter):
 def test_plates_are_drawn_red_and_blue(plotter):
     view = SceneView(plotter)
     view.set_planar(True)
-    view.set_plates(Capacitor(normal="x").plates())
+    view.set_plates(Capacitor(normal="x").slabs())
     plotter.render()
     image = plotter.screenshot(return_img=True).astype(int)
     h, w = image.shape[:2]
-    # plates at x = ±1.5 cm; the view spans ±10.8 cm
-    right = image[h // 2, int(w / 2 + 1.5 / 10.8 * w / 2)]
-    left = image[h // 2, int(w / 2 - 1.5 / 10.8 * w / 2)]
+    # slabs from x = ±1.5 to ±1.7 cm; the view spans ±10.8 cm
+    right = image[h // 2, int(w / 2 + 1.6 / 10.8 * w / 2)]
+    left = image[h // 2, int(w / 2 - 1.6 / 10.8 * w / 2)]
     assert right[0] > right[2] + 60  # positive: red
     assert left[2] > left[0] + 60  # negative: blue
 
@@ -82,30 +83,37 @@ def test_plates_coloured_by_density_in_2d(plotter):
     presets.load(scene, "capacitor")
     view = SceneView(plotter)
     view.set_planar(True)
-    view.set_plates(scene.plates(), scene.plate_densities(), planar=True)
-    assert len(view.plate_actors) == 4  # an inner and an outer strip for each plate
+    view.set_plates(scene.drawn_plates(), scene.plate_densities(), planar=True)
+    assert len(view.plate_actors) == 8  # each slab's cut: an inner and an outer half, two ends
     assert tr("bar_sigma") in plotter.scalar_bars
     plotter.render()
     image = plotter.screenshot(return_img=True).astype(int)
     h, w = image.shape[:2]
-    right = image[h // 2, int(w / 2 + 1.5 / 10.8 * w / 2)]
-    left = image[h // 2, int(w / 2 - 1.5 / 10.8 * w / 2)]
+    right = image[h // 2, int(w / 2 + 1.6 / 10.8 * w / 2)]  # the middle of each slab, 1.5 to 1.7 cm out
+    left = image[h // 2, int(w / 2 - 1.6 / 10.8 * w / 2)]
     assert right[0] > right[2] + 60 and left[2] > left[0] + 60  # + red, - blue
-    view.set_plates(scene.plates(), None, planar=True)  # back to plain plates: the colour bar goes too
+    view.set_plates(scene.drawn_plates(), None, planar=True)  # back to plain plates: the colour bar goes too
     assert len(view.plate_actors) == 2
     assert tr("bar_sigma") not in plotter.scalar_bars
 
 
 def test_plates_coloured_by_density_in_3d(plotter):
-    from field_lines.view import face_sheets
+    from field_lines.view import slab_faces
 
     scene = Scene()
     presets.load(scene, "capacitor")
     plus = scene.plate_densities()[0]
-    inner, outer = face_sheets(plus)
-    # the + plate is at z = +1.5 cm: its inner face is the lower one
-    assert inner.points[:, 2].max() < outer.points[:, 2].min()
-    assert np.allclose(inner["sigma"], 0.2) and np.allclose(outer["sigma"], 0.2)  # μC/m²
+    inner, outer, *rims = slab_faces(plus)
+    # the + plate is above z = +1.5 cm: its inner face is the lower one, a thickness below the outer one
+    assert inner.points[:, 2] == pytest.approx(0.015)
+    assert outer.points[:, 2] == pytest.approx(0.017)
+    assert len(rims) == 4
+    for rim in rims:  # the rims close the slab
+        assert rim.points[:, 2].min() == pytest.approx(0.015) and rim.points[:, 2].max() == pytest.approx(0.017)
+    surface = pv.merge([inner, outer, *rims]).extract_surface(algorithm="dataset_surface").clean()
+    assert surface.n_open_edges == 0
+    for face in (inner, outer, *rims):
+        assert np.allclose(face["sigma"], 0.2)  # μC/m²
 
 
 def test_lines_are_drawn_only_inside_the_drawing_box():
@@ -151,7 +159,8 @@ def test_contrast_scale_on_a_sphere_between_plates(plotter):
     scene.conductor = Solver(scene.conductor_plates(), scene.spheres).solve(scene.voltages())
     view = SceneView(plotter)
     for scale, title in (("symmetric", "bar_sigma"), ("contrast", "bar_sigma"), ("log", "bar_sigma_abs")):
-        view.set_plates(scene.plates(), scene.plate_densities(), False, scene.sphere_densities(), scale, "viridis")
+        spheres = scene.sphere_densities()
+        view.set_plates(scene.drawn_plates(), scene.plate_densities(), False, spheres, scale, "viridis")
         assert list(plotter.scalar_bars.keys()) == [tr(title)]
         lo, hi = view.sphere_actors[0][0].mapper.scalar_range
         if scale == "log":

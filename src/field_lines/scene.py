@@ -17,7 +17,7 @@ from field_lines import conductors, seeding
 from field_lines.conductors import ConductorSolution, Sphere
 from field_lines.sources import AXES, FieldModel, Plate, PointCharge, Superposition
 from field_lines.tracing import FieldLine, trace
-from field_lines.units import CM, EPS0, NC, UC_PER_M2
+from field_lines.units import CM, EPS0, MM, NC, UC_PER_M2
 
 VIEW_HALF = 10 * CM  # the view shows the cube |x|, |y|, |z| <= VIEW_HALF
 # Lines are followed far outside the view: a line leaving a capacitor's outer face makes a loop
@@ -46,13 +46,14 @@ class Capacitor:
     sigma: float = 0.2 * UC_PER_M2  # charges model: charge density of the positive plate
     voltage: float = 500.0  # conductors model: the plates are at +voltage/2 and -voltage/2
     normal: str = "z"  # the capacitor's axis; the positive plate is on its + side
+    thickness: float = 2 * MM  # of each plate; separation is the gap between the plates' inner faces
 
     @property
     def area(self) -> float:
         return self.width * self.height
 
     def plates(self, sigma: float | None = None) -> list[Plate]:
-        """The positive and the negative plate, with density ±sigma (default: self.sigma)."""
+        """The plates as charged sheets at their inner faces, with density ±sigma (default: self.sigma)."""
         sigma = self.sigma if sigma is None else sigma
         offset = np.zeros(3)
         offset[AXES.index(self.normal)] = self.separation / 2
@@ -61,16 +62,28 @@ class Capacitor:
             Plate(-sigma, -offset, self.width, self.height, self.normal),
         ]
 
+    def slabs(self, sigma: float | None = None) -> list[Plate]:
+        """The plates as slabs: inner faces at ±separation/2, outer faces a thickness farther out."""
+        sigma = self.sigma if sigma is None else sigma
+        offset = np.zeros(3)
+        offset[AXES.index(self.normal)] = self.separation / 2 + self.thickness / 2
+        return [
+            Plate(sigma, offset, self.width, self.height, self.normal, self.thickness),
+            Plate(-sigma, -offset, self.width, self.height, self.normal, self.thickness),
+        ]
+
 
 @dataclass
 class PlateDensity:
-    """Surface charge density over a plate's two faces, on a grid of its local (u, v) coordinates."""
+    """Surface charge density over a slab's faces, on grids of its local (u, v) coordinates."""
 
-    plate: Plate
+    plate: Plate  # the slab
     u: np.ndarray  # along the plate's width
     v: np.ndarray  # along its height
     inner: np.ndarray  # (len(u), len(v)) σ on the face towards the other plate, C/m²
     outer: np.ndarray  # σ on the face away from it
+    rim_u: np.ndarray  # (2, len(v)) σ on the rims at u = -width/2 and u = +width/2, along v
+    rim_v: np.ndarray  # (2, len(u)) σ on the rims at v = -height/2 and v = +height/2, along u
 
     def at(self, u: float, v: float) -> tuple[float, float]:
         """σ of the inner and outer face at a point of the plate (nearest grid node)."""
@@ -103,8 +116,8 @@ class Scene:
         return self.spheres if self.uses_conductor else []
 
     def conductor_plates(self) -> list[Plate]:
-        """The capacitor's plates as conductors (their σ means nothing: the solution has the charges)."""
-        return self.capacitor.plates(0.0) if self.capacitor is not None else []
+        """The capacitor's plates as conductors: slabs (their σ means nothing: the solution has the charges)."""
+        return self.capacitor.slabs(0.0) if self.capacitor is not None else []
 
     def voltages(self) -> list[float]:
         """The conductors' potentials, plates first, then spheres."""
@@ -128,6 +141,18 @@ class Scene:
                 plate.sigma = (1 - 2 * k) * EPS0 * self.capacitor.voltage / self.capacitor.separation
         return plates
 
+    def drawn_plates(self) -> list[Plate]:
+        """The plates as they are drawn: slabs of the capacitor's thickness, with their σ for the colour.
+
+        In the charges model the charged sheet is the slab's inner face.
+        """
+        if self.capacitor is None:
+            return []
+        slabs = self.capacitor.slabs()
+        for slab, plate in zip(slabs, self.plates()):
+            slab.sigma = plate.sigma
+        return slabs
+
     def plate_densities(self) -> list[PlateDensity] | None:
         """σ over both plates: uniform in the σ model, from the solution in the conductor model.
 
@@ -138,17 +163,24 @@ class Scene:
         if self.capacitor is None or (self.uses_conductor and self.conductor is None):
             return None
         densities = []
-        for k, plate in enumerate(self.plates()):
-            a, b = plate.width / 2, plate.height / 2
+        for k, slab in enumerate(self.drawn_plates()):
+            a, b = slab.width / 2, slab.height / 2
             if not self.uses_conductor:
-                same = np.full((2, 2), plate.sigma)
-                densities.append(PlateDensity(plate, np.array([-a, a]), np.array([-b, b]), same, same.copy()))
+                same = np.full((2, 2), slab.sigma)
+                edges = np.array([-a, a]), np.array([-b, b])
+                densities.append(PlateDensity(slab, *edges, same, same.copy(), same.copy(), same.copy()))
                 continue
-            u, v = conductors.plate_face_grid(plate)
+            u, v = conductors.plate_face_grid(slab)
             # the panels' centres, and the plate's edges with the outermost panels' σ
             u, v = np.concatenate(([-a], u, [a])), np.concatenate(([-b], v, [b]))
             inner, outer = (np.pad(face, 1, mode="edge") for face in self.conductor.faces[k])
-            densities.append(PlateDensity(plate, u, v, inner, outer))
+
+            def rim(name: str) -> np.ndarray:  # σ along a rim, averaged across the thickness
+                return np.pad(self.conductor.face(k, name).mean(axis=1), 1, mode="edge")
+
+            rim_u = np.array([rim("u-"), rim("u+")])
+            rim_v = np.array([rim("v-"), rim("v+")])
+            densities.append(PlateDensity(slab, u, v, inner, outer, rim_u, rim_v))
         return densities
 
     def sphere_densities(self) -> list[tuple[np.ndarray, np.ndarray, np.ndarray | None]] | None:
@@ -225,7 +257,8 @@ class Scene:
             return []
         if self.planar:
             model = InThePlane(model)
-        charges, plates, spheres = self.active_charges(), self.plates(), self.active_spheres()
+        # the lines start from and end on the plates as they are drawn, slabs, whatever the model
+        charges, plates, spheres = self.active_charges(), self.drawn_plates(), self.active_spheres()
         points, directions = seeding.seeds(
             model,
             charges,
@@ -284,11 +317,8 @@ def start_on_surface(line: FieldLine, plates: list[Plate], spheres: list[Sphere]
     first = line.points[0]
     surface = None
     for plate in plates:
-        local = plate.to_local(first[None])[0]
-        on_face = abs(local[2]) <= 1.001 * PLATE_OFFSET
-        if on_face and abs(local[0]) <= plate.width / 2 and abs(local[1]) <= plate.height / 2:
-            local[2] = 0.0
-            surface = plate.from_local(local[None])[0] + plate.center
+        if plate.distance(first) <= 1.001 * PLATE_OFFSET:
+            surface = plate.surface_point(first)
     for sphere in spheres:
         out = first - sphere.center
         d = np.linalg.norm(out)

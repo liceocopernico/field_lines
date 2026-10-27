@@ -146,7 +146,7 @@ def test_click_on_the_plane_in_3d_seeds_a_line_and_reads_out(window, qtbot):
 def test_capacitor_preset_shows_plates_and_readouts(window):
     window.load_preset("capacitor")
     window._retrace()
-    assert len(window.view.plate_actors) == 2
+    assert len(window.view.plate_actors) == 12  # each plate a closed slab: six faces, coloured by σ
     texts = {key: label.text() for key, label in window.panel.readouts.items()}
     assert texts["readout_Q"] == "2.00 nC"
     assert texts["readout_E_ideal"] == "22.6 kV/m"  # σ/ε₀ with σ = 0.2 μC/m²
@@ -172,7 +172,7 @@ def test_conductor_model_is_solved_in_the_background(window, qtbot):
     wait_for_solve(window, qtbot)
     assert window.status_light.text() != tr("computing")
     assert window.panel.readouts["readout_dV"].text() == "500 V"
-    assert window.panel.readouts["readout_C"].text() == "5.26 pF"
+    assert window.panel.readouts["readout_C"].text() == "5.50 pF"
     assert all(line.end == "plate" for line in window.view.lines)
     # a new ΔV needs no new solve
     window.panel.voltage_box.setValue(1000)
@@ -305,17 +305,42 @@ def test_reading_the_camera_does_not_move_it(window):
         assert window.plotter.renderer.GetActiveCamera().GetPosition() == before
 
 
-def test_colouring_the_plates_by_density(window):
+def test_colouring_the_conductors_by_density(window, qtbot):
     window.load_preset("capacitor")
-    assert len(window.view.plate_actors) == 2
-    window.panel.plate_sigma_box.setChecked(True)
-    assert len(window.view.plate_actors) == 4
+    assert window.panel.conductor_sigma_box.isChecked()
+    assert len(window.view.plate_actors) == 12
     assert tr("bar_sigma") in window.plotter.scalar_bars
     window.panel.language_combo.setCurrentIndex(window.panel.language_combo.findData("en"))
     assert "charge density [μC/m²]" in window.plotter.scalar_bars
-    window.panel.plate_sigma_box.setChecked(False)
-    assert len(window.view.plate_actors) == 2
+    window.panel.conductor_sigma_box.setChecked(False)
+    assert len(window.view.plate_actors) == 2  # plain slabs
     assert not any("density" in title or "densità" in title for title in window.plotter.scalar_bars.keys())
+    assert not window.panel.sigma_scale.isEnabled()
+    # the same check box for metallic spheres alone, with no capacitor
+    window.load_preset("sphere")
+    wait_for_solve(window, qtbot)
+    assert not window.panel.capacitor_form.isVisibleTo(window.panel)
+    assert window.panel.conductor_sigma_box.isVisibleTo(window.panel)
+    assert window.view.sphere_actors[0][0].mapper.scalar_visibility is False  # plain grey
+    window.panel.conductor_sigma_box.setChecked(True)
+    assert window.view.sphere_actors[0][0].mapper.scalar_visibility is True
+    assert tr("bar_sigma") in window.plotter.scalar_bars and window.panel.sigma_scale.isEnabled()
+
+
+def test_plate_thickness_from_the_panel(window, qtbot):
+    window.load_preset("capacitor")
+    window.panel.radio_conductors.setChecked(True)
+    wait_for_solve(window, qtbot)
+    thin = window.scene.conductor.charge(0)
+    window.panel.thickness_box.setValue(6.0)
+    assert window.scene.capacitor.thickness == pytest.approx(0.006)
+    assert window._computing()  # a new geometry: solved again
+    wait_for_solve(window, qtbot)
+    plus = window.scene.drawn_plates()[0]
+    assert plus.center[2] == pytest.approx(0.015 + 0.003)  # the gap d stays, the slab grows outwards
+    assert window.scene.conductor.charge(0) > thin  # the rims add some capacitance
+    window.load_preset("capacitor")
+    assert window.panel.thickness_box.value() == pytest.approx(2.0)
 
 
 def test_dragging_a_metal_sphere_with_the_mouse(window, qtbot):

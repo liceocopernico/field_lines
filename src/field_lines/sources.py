@@ -54,6 +54,11 @@ class Plate:
     spans |u| <= width/2, |v| <= height/2, w = 0, where w is the normal axis
     and (u, v, w) follows the axes cyclically: normal z -> (x, y, z),
     normal x -> (y, z, x), normal y -> (z, x, y).
+
+    With a thickness the plate is a slab, |w| <= thickness/2: a box-shaped
+    conductor in the conductors model. Its field and potential here are those
+    of the uniformly charged sheet (thickness 0), which only the charges
+    model uses.
     """
 
     sigma: float
@@ -61,6 +66,7 @@ class Plate:
     width: float
     height: float
     normal: str = "z"
+    thickness: float = 0.0
 
     def __post_init__(self):
         self.center = np.asarray(self.center, dtype=float)
@@ -78,6 +84,25 @@ class Plate:
         out = np.empty_like(vectors)
         out[:, self.local_axes] = vectors
         return out
+
+    @property
+    def half(self) -> np.ndarray:
+        """Half sizes along local u, v, w."""
+        return np.array([self.width / 2, self.height / 2, self.thickness / 2])
+
+    def surface_point(self, point: np.ndarray) -> np.ndarray:
+        """The point of the plate's surface nearest to point (from outside, or from inside the slab)."""
+        local = self.to_local(point[None])[0]
+        nearest = np.clip(local, -self.half, self.half)
+        if np.array_equal(nearest, local):  # inside: out through the nearest face
+            k = int(np.argmin(self.half - np.abs(local)))
+            nearest[k] = (1.0 if local[k] >= 0 else -1.0) * self.half[k]
+        return self.from_local(nearest[None])[0] + self.center
+
+    def distance(self, point: np.ndarray) -> float:
+        """Distance from the plate (0 inside the slab)."""
+        local = self.to_local(point[None])[0]
+        return float(np.linalg.norm(local - np.clip(local, -self.half, self.half)))
 
     def field(self, points: np.ndarray) -> np.ndarray:
         u, v, w = self.to_local(points).T

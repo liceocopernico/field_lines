@@ -20,9 +20,9 @@ NEGATIVE_COLOR = (0.12, 0.25, 0.85)
 OUTLINE_COLOR = (0.8, 0.8, 0.8)
 EQUIPOTENTIAL_COLOR = (0.1, 0.55, 0.25)
 V_CMAP = "RdBu_r"  # red for positive potentials, blue for negative, like the charges
-PLATE_THICKNESS = 0.0015  # m, only for drawing
-FACE_STRIP = 0.002  # m: in 2D each face of a cut plate is drawn as a strip this wide, a sphere's rim as a ring
-PLANE_BELOW = 0.0003  # m: in 2D a sphere's inside is drawn just below the lines
+SHEET_THICKNESS = 0.0015  # m: a plate without a thickness (a sheet) is drawn this thick
+FACE_STRIP = 0.002  # m: in 2D a sphere's rim is drawn as a ring this wide, a cut slab's ends at most this wide
+PLANE_BELOW = 0.0003  # m: in 2D a sphere's inside is drawn just below the lines, a cut slab just above them
 SPHERE_INSIDE = (0.85, 0.85, 0.85)
 SIGMA_BAR = dict(vertical=False, position_x=0.3, position_y=0.02, width=0.4, height=0.1)
 SIGMA_SCALES = ("symmetric", "contrast", "log")
@@ -189,41 +189,63 @@ def _sheet(plate: Plate, local: np.ndarray, sigma: np.ndarray) -> pv.StructuredG
     return mesh
 
 
-def face_sheets(density: PlateDensity) -> list[pv.StructuredGrid]:
-    """3D: the plate's two faces, a little apart, each coloured by its own σ."""
-    uu, vv = np.meshgrid(density.u, density.v, indexing="ij")
-    inner = _inner_side(density.plate)
-    sheets = []
+def slab_faces(density: PlateDensity) -> list[pv.StructuredGrid]:
+    """3D: the slab's six faces, each coloured by its own σ (a rim's is the same across the thickness)."""
+    plate = density.plate
+    a, b, c = plate.half
+    u, v, across = density.u, density.v, np.array([-c, c])
+    inner = _inner_side(plate)
+    faces = []
+    uu, vv = np.meshgrid(u, v, indexing="ij")
     for side, sigma in ((inner, density.inner), (-inner, density.outer)):
-        local = np.stack((uu, vv, np.full(uu.shape, side * PLATE_THICKNESS / 2)), axis=-1)
-        sheets.append(_sheet(density.plate, local, sigma))
-    return sheets
+        faces.append(_sheet(plate, np.stack((uu, vv, np.full(uu.shape, side * c)), axis=-1), sigma))
+    for along, ends, rims, axis in ((v, (-a, a), density.rim_u, 0), (u, (-b, b), density.rim_v, 1)):
+        ss, ww = np.meshgrid(along, across, indexing="ij")
+        for end, sigma in zip(ends, rims):
+            local = np.stack((np.full(ss.shape, end), ss, ww) if axis == 0 else (ss, np.full(ss.shape, end), ww), -1)
+            faces.append(_sheet(plate, local, np.repeat(sigma[:, None], 2, axis=1)))
+    return faces
 
 
-def face_strips(density: PlateDensity) -> list[pv.StructuredGrid]:
-    """2D: where the plate crosses the z = 0 plane, a strip on each side of it coloured by that face's σ."""
+def slab_section(density: PlateDensity) -> list[pv.StructuredGrid]:
+    """2D: the slab's cut by the z = 0 plane, a rectangle.
+
+    Its half towards the other plate is coloured by the inner face's σ, the
+    other half by the outer face's, and its two ends by the rims' σ.
+    """
     plate = density.plate
     z_axis = plate.local_axes.index(2)
     if z_axis == 2:
         return []  # a plate lying in the plane is not cut by it
     cut = -plate.center[2]
-    if z_axis == 1:  # the plate runs along u in the plane
-        along = density.u
+    half = plate.half
+    if z_axis == 1:  # the slab runs along u in the plane
+        along_axis, along = 0, density.u
         j = int(np.argmin(np.abs(density.v - cut)))
-        faces = density.inner[:, j], density.outer[:, j]
+        faces, rims = (density.inner[:, j], density.outer[:, j]), density.rim_u[:, j]
     else:
-        along = density.v
+        along_axis, along = 1, density.v
         i = int(np.argmin(np.abs(density.u - cut)))
-        faces = density.inner[i, :], density.outer[i, :]
+        faces, rims = (density.inner[i, :], density.outer[i, :]), density.rim_v[:, i]
+    end = half[along_axis] - min(FACE_STRIP, half[along_axis] / 4)  # where the faces give way to the ends
+    inside = np.concatenate(([-end], along[np.abs(along) < end], [end]))
+    lift = PLANE_BELOW  # above the lines and the equipotentials, which the slab hides
+
+    def rectangle(a: np.ndarray, w: np.ndarray, sigma: np.ndarray) -> pv.StructuredGrid:
+        aa, ww = np.meshgrid(a, w, indexing="ij")
+        c = np.full(aa.shape, cut)
+        local = np.stack((aa, c, ww) if along_axis == 0 else (c, aa, ww), axis=-1)
+        mesh = _sheet(plate, local, np.repeat(sigma[:, None], len(w), axis=1))
+        mesh.points[:, 2] += lift
+        return mesh
+
     inner = _inner_side(plate)
-    strips = []
-    for side, sigma in ((inner, faces[0]), (-inner, faces[1])):
-        across = np.array([0.0, side * FACE_STRIP])
-        a, w = np.meshgrid(along, across, indexing="ij")
-        c = np.full(a.shape, cut)
-        local = np.stack((a, c, w) if z_axis == 1 else (c, a, w), axis=-1)
-        strips.append(_sheet(plate, local, np.repeat(sigma[:, None], 2, axis=1)))
-    return strips
+    pieces = [rectangle(inside, np.array([0.0, side * half[2]]), np.interp(inside, along, sigma))
+              for side, sigma in ((inner, faces[0]), (-inner, faces[1]))]
+    for side, sigma in zip((-1, 1), rims):
+        ends = np.array([end, half[along_axis]]) * side
+        pieces.append(rectangle(ends, np.array([-half[2], half[2]]), np.full(2, sigma)))
+    return pieces
 
 
 def sphere_ring(points: np.ndarray, quads: np.ndarray, sigma: np.ndarray, samples: int = 144) -> pv.StructuredGrid:
@@ -387,7 +409,7 @@ class SceneView:
             for language in LANGUAGES:
                 if STRINGS[key][language] in self.pl.scalar_bars:
                     self.pl.remove_scalar_bar(STRINGS[key][language], render=False)
-        values = [np.concatenate((d.inner.ravel(), d.outer.ravel())) for d in densities or []]
+        values = [np.concatenate([a.ravel() for a in (d.inner, d.outer, d.rim_u, d.rim_v)]) for d in densities or []]
         values += [sigma for _, _, sigma in spheres or [] if sigma is not None]
         colours = sigma_colours(np.concatenate(values) / UC_PER_M2 if values else np.zeros(0), scale, palette)
         if densities:
@@ -399,7 +421,7 @@ class SceneView:
         if densities:
             return
         for plate in plates:
-            half = np.array([plate.width / 2, plate.height / 2, PLATE_THICKNESS / 2])
+            half = np.maximum(plate.half, [0.0, 0.0, SHEET_THICKNESS / 2])
             lo = plate.from_local(-half[None])[0] + plate.center
             hi = plate.from_local(half[None])[0] + plate.center
             bounds = np.column_stack((lo, hi)).ravel()
@@ -428,7 +450,7 @@ class SceneView:
 
     def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool, colours: SigmaColours) -> None:
         for density in densities:
-            for mesh in face_strips(density) if planar else face_sheets(density):
+            for mesh in slab_section(density) if planar else slab_faces(density):
                 self.plate_actors.append(self._sigma_mesh(mesh, colours, planar))
 
     def _coloured_sphere(self, points, quads, sigma: np.ndarray | None, planar: bool, colours: SigmaColours):

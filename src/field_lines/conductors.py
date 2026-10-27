@@ -6,10 +6,12 @@ chosen so that the centre of every panel is at its conductor's potential (the
 method of moments, or boundary elements). That solves Laplace's equation
 outside the conductors with V -> 0 far away, without a grid.
 
-- A plate is a thin rectangle cut into PLATE_PANELS x PLATE_PANELS panels,
-  finer towards its edges, where the charge piles up. Its two faces are told
-  apart afterwards: each carries σ/2 plus or minus ε₀ times the field of all
-  the other panels across it.
+- A plate with a thickness is a box: its two large faces are cut into
+  PLATE_PANELS x PLATE_PANELS panels, finer towards their edges, where the
+  charge piles up, and its four rims into strips of panels. Every face then
+  has its own charge. (A plate of zero thickness is one sheet of panels; its
+  two faces are told apart afterwards: each carries σ/2 plus or minus ε₀
+  times the field of all the other panels across it.)
 - A sphere is a cube projected onto it: 6 faces of SPHERE_PANELS x
   SPHERE_PANELS panels.
 
@@ -39,11 +41,11 @@ from scipy.linalg import lu_factor, lu_solve
 from field_lines.sources import Plate
 from field_lines.units import EPS0, K
 
-PLATE_PANELS = 25  # per side of a plate; odd, so that a row of panels lies on each centre line
+PLATE_PANELS = 21  # per side of a plate's face; odd, so that a row of panels lies on each centre line
 SPHERE_PANELS = 8  # per edge of each of the six faces of the cube
 NEAR = 4.0  # closer than this many panel sizes, a panel is a rectangle, not a point charge
 CHUNK = 1000  # points per block of point-panel pairs
-PLATE_BLOCK = 5  # a plate's clusters are blocks of 5 x 5 panels
+PLATE_BLOCK = 3  # a plate face's clusters are blocks of 3 x 3 panels (smaller: fewer panels one by one near a slab)
 SPHERE_BLOCK = 4  # a sphere's are blocks of 4 x 4 panels on each face of the cube
 CLUSTER_NEAR = 4.0  # farther than this many cluster radii, a cluster is a charge and a dipole
 
@@ -91,6 +93,67 @@ def plate_face_grid(plate: Plate, n: int | None = None) -> tuple[np.ndarray, np.
     return (eu[1:] + eu[:-1]) / 2, (ev[1:] + ev[:-1]) / 2
 
 
+def _counter_clockwise(corners: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    """The corners turned counter-clockwise about the normal (reversed where they are not)."""
+    turn = np.einsum("pk,pk->p", np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), normal)
+    corners = corners.copy()
+    corners[turn < 0] = corners[turn < 0, ::-1]
+    return corners
+
+
+def _face_grid(plate: Plate, along: tuple[int, int], edges: tuple[np.ndarray, np.ndarray], at: float, outward: int):
+    """Panels of one face of a box plate: a grid over local axes along[0] x along[1] at local[outward axis] = at.
+
+    Returns centres, normals and corners (global, corners relative to the centres), row-major over the grid.
+    """
+    (i, j), (e1, e2) = along, edges
+    k = 3 - i - j
+    c1, c2 = (e1[1:] + e1[:-1]) / 2, (e2[1:] + e2[:-1]) / 2
+    g1, g2 = np.meshgrid(c1, c2, indexing="ij")
+    h1, h2 = (h.ravel() for h in np.meshgrid(np.diff(e1) / 2, np.diff(e2) / 2, indexing="ij"))
+    count = g1.size
+    local = np.zeros((count, 3))
+    local[:, i], local[:, j], local[:, k] = g1.ravel(), g2.ravel(), at
+    corner_local = np.zeros((count, 4, 3))
+    for c, (s1, s2) in enumerate(((-1, -1), (1, -1), (1, 1), (-1, 1))):
+        corner_local[:, c, i], corner_local[:, c, j] = s1 * h1, s2 * h2
+    normal_local = np.zeros(3)
+    normal_local[k] = 1.0 if at >= 0 else -1.0
+    normal = plate.from_local(normal_local[None])[0]
+    corners = plate.from_local(corner_local.reshape(-1, 3)).reshape(count, 4, 3)
+    normals = np.repeat(normal[None], count, axis=0)
+    return plate.from_local(local) + plate.center, normals, _counter_clockwise(corners, normals)
+
+
+def box_panels(plate: Plate, owner: int, n: int | None = None) -> tuple[Panels, dict]:
+    """The six faces of a slab: the large faces at local w = ±t/2, then the rims at u = ±a and v = ±b.
+
+    Returns the panels and the layout: for each face, its first panel and grid shape.
+    """
+    n = n or PLATE_PANELS
+    a, b, half_t = plate.half
+    eu, ev = panel_edges(a, n), panel_edges(b, n)
+    # panels across the thickness, about as wide as the face panels
+    across = max(1, round(2 * half_t / (2 * a / n)))
+    ew = np.linspace(-half_t, half_t, across + 1)
+    faces = [
+        ("w+", (0, 1), (eu, ev), half_t),
+        ("w-", (0, 1), (eu, ev), -half_t),
+        ("u+", (1, 2), (ev, ew), a),
+        ("u-", (1, 2), (ev, ew), -a),
+        ("v+", (0, 2), (eu, ew), b),
+        ("v-", (0, 2), (eu, ew), -b),
+    ]
+    parts, layout, first = [], {}, 0
+    for name, along, edges, at in faces:
+        centers, normals, corners = _face_grid(plate, along, edges, at, 3 - sum(along))
+        shape = (len(edges[0]) - 1, len(edges[1]) - 1)
+        layout[name] = (first, shape)
+        first += shape[0] * shape[1]
+        parts.append(Panels(centers, normals, corners, np.full(len(centers), owner)))
+    return _join(parts), layout
+
+
 def plate_panels(plate: Plate, owner: int, n: int | None = None) -> Panels:
     n = n or PLATE_PANELS
     eu, ev = panel_edges(plate.width / 2, n), panel_edges(plate.height / 2, n)
@@ -100,7 +163,8 @@ def plate_panels(plate: Plate, owner: int, n: int | None = None) -> Panels:
     e_u, e_v, normal = plate.from_local(np.eye(3))  # the global directions of local u, v, w
     hu, hv = (h.ravel()[:, None] for h in np.meshgrid(np.diff(eu) / 2, np.diff(ev) / 2, indexing="ij"))
     corners = np.stack((-hu * e_u - hv * e_v, hu * e_u - hv * e_v, hu * e_u + hv * e_v, -hu * e_u + hv * e_v), axis=1)
-    return Panels(plate.from_local(local) + plate.center, np.repeat(normal[None], uu.size, axis=0), corners, np.full(uu.size, owner))
+    normals = np.repeat(normal[None], uu.size, axis=0)
+    return Panels(plate.from_local(local) + plate.center, normals, corners, np.full(uu.size, owner))
 
 
 def sphere_mesh(center: np.ndarray, radius: float, m: int | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -325,19 +389,27 @@ class Solver:
     def __init__(self, plates: Sequence[Plate], spheres: Sequence[Sphere]):
         self.plates = list(plates)
         self.spheres = list(spheres)
-        parts = [plate_panels(plate, k) for k, plate in enumerate(self.plates)]
-        parts += [sphere_panels(sphere, len(self.plates) + k) for k, sphere in enumerate(self.spheres)]
-        self.panels = _join(parts)
-        self.lu = lu_factor(interaction_matrix(self.panels), check_finite=False)
-        groups = []
-        first = 0
-        for _ in self.plates:
-            groups += _blocks(first, PLATE_PANELS, PLATE_PANELS, PLATE_BLOCK)
-            first += PLATE_PANELS**2
-        for _ in self.spheres:
+        parts, groups, first = [], [], 0
+        self.layouts: list[dict | None] = []  # for each plate, where its faces' panels are (None: a sheet)
+        for k, plate in enumerate(self.plates):
+            if plate.thickness > 0:
+                panels, layout = box_panels(plate, k)
+                for start, shape in layout.values():
+                    groups += _blocks(first + start, *shape, PLATE_BLOCK)
+                self.layouts.append({name: (first + start, shape) for name, (start, shape) in layout.items()})
+            else:
+                panels = plate_panels(plate, k)
+                groups += _blocks(first, PLATE_PANELS, PLATE_PANELS, PLATE_BLOCK)
+                self.layouts.append(None)
+            parts.append(panels)
+            first += len(panels)
+        for k, sphere in enumerate(self.spheres):
+            parts.append(sphere_panels(sphere, len(self.plates) + k))
             for _face in range(6):
                 groups += _blocks(first, SPHERE_PANELS, SPHERE_PANELS, SPHERE_BLOCK)
                 first += SPHERE_PANELS**2
+        self.panels = _join(parts)
+        self.lu = lu_factor(interaction_matrix(self.panels), check_finite=False)
         self.clusters = make_clusters(self.panels, groups)
 
     def solve(self, voltages: Sequence[float]) -> "ConductorSolution":
@@ -372,7 +444,7 @@ class ConductorSolution:
         """The charge of a conductor's positive (sign +1) or negative (-1) parts, as a positive number."""
         mine = self.panels.owner == conductor
         area = self.panels.area[mine]
-        if conductor < len(self.solver.plates):
+        if conductor < len(self.solver.plates) and self.solver.layouts[conductor] is None:
             inner, outer = self.faces[conductor]
             densities = np.concatenate((inner.ravel(), outer.ravel()))
             area = np.concatenate((area, area))
@@ -384,14 +456,24 @@ class ConductorSolution:
         """σ on the panels of sphere k, in the order of sphere_mesh's quads."""
         return self.sigma[self.panels.owner == len(self.solver.plates) + k]
 
+    def face(self, plate: int, name: str) -> np.ndarray:
+        """σ on one face of a box plate ("w+", "w-", "u+", "u-", "v+", "v-") as its grid of panels."""
+        start, shape = self.solver.layouts[plate][name]
+        return self.sigma[start : start + shape[0] * shape[1]].reshape(shape)
+
     def _plate_faces(self) -> list[tuple[np.ndarray, np.ndarray]]:
         """σ on each plate's inner face (towards the origin, where the other plate is) and outer face.
 
-        Each face carries σ/2 ± ε₀ E·n, with E the field at the panel's centre:
-        a panel's own field has no component across it there.
+        A box plate has its faces' own panels. On a sheet, each face carries σ/2 ± ε₀ E·n,
+        with E the field at the panel's centre: a panel's own field has no component across it there.
         """
         faces = []
         for k, plate in enumerate(self.solver.plates):
+            if self.solver.layouts[k] is not None:
+                plus_side = plate.center @ plate.from_local(np.array([[0.0, 0.0, 1.0]]))[0] > 0
+                inner, outer = ("w-", "w+") if plus_side else ("w+", "w-")
+                faces.append((self.face(k, inner), self.face(k, outer)))
+                continue
             mine = np.flatnonzero(self.panels.owner == k)
             normal = self.panels.normals[mine[0]]
             inward = -normal if plate.center @ normal > 0 else normal
@@ -405,7 +487,10 @@ class ConductorSolution:
 def geometry_key(plates: Sequence[Plate], spheres: Sequence[Sphere]) -> tuple:
     """What the interaction matrix depends on (not the potentials)."""
     return (
-        tuple((tuple(np.round(p.center, 9)), round(p.width, 9), round(p.height, 9), p.normal) for p in plates),
+        tuple(
+            (tuple(np.round(p.center, 9)), round(p.width, 9), round(p.height, 9), p.normal, round(p.thickness, 9))
+            for p in plates
+        ),
         tuple((tuple(np.round(s.center, 9)), round(s.radius, 9)) for s in spheres),
     )
 
@@ -417,8 +502,6 @@ def touching(plates: Sequence[Plate], spheres: Sequence[Sphere], gap: float = 1e
             if np.linalg.norm(s.center - t.center) < s.radius + t.radius + gap:
                 return True
         for plate in plates:
-            local = plate.to_local(s.center[None])[0]
-            half = np.array([plate.width / 2, plate.height / 2, 0.0])
-            if np.linalg.norm(local - np.clip(local, -half, half)) < s.radius + gap:
+            if plate.distance(s.center) < s.radius + gap:
                 return True
     return False

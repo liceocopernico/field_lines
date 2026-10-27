@@ -154,3 +154,35 @@ def test_shares_and_stratified_sampling():
     weights = np.where(candidates[:, 0] < 0.5, 3.0, 1.0)  # three times denser on the left half
     seeds = seeding._stratified(candidates, weights, 8)
     assert (seeds[:, 0] < 0.5).sum() == 6
+
+
+def test_lines_end_on_the_surface_of_a_slab():
+    # a negative slab 1 cm thick, under lines going down: they stop where they enter it
+    slab = Plate(-50e-9 / 0.01, [0.0, 0.0, -0.03], 0.1, 0.1, "z", thickness=0.01)
+    seeds = np.array([[0.0, 0.0, 0.0], [0.01, 0.02, 0.0], [0.049, 0.0, -0.02]])
+    down = np.array([[0.0, 0.0, -1.0]] * 3)
+
+    class Down:  # a uniform field towards -z
+        def field(self, p):
+            return np.broadcast_to(down[:1], p.shape).copy()
+
+    lines = trace(Down(), seeds, np.ones(3), plates=[slab], **OPTIONS)
+    assert [line.end for line in lines] == ["plate"] * 3
+    for line in lines:
+        assert slab.distance(line.points[-1]) < 1e-12  # on the surface...
+        assert np.all(np.abs(slab.to_local(line.points[-1:])[0]) <= slab.half + 1e-12)  # ...not inside
+    np.testing.assert_allclose(lines[0].points[-1], [0.0, 0.0, -0.025], atol=1e-12)  # the top face
+
+
+def test_seeds_cover_a_slab_and_its_rims():
+    slab = Plate(1e-6, [0.0, 0.0, 0.0], 0.1, 0.1, "z", thickness=0.01)
+    model = PointCharge(1 * NC, [0.0, 0.0, 0.0])  # a radial field out of the slab's centre
+    points = seeding.plate_seeds(model, slab, 300, 0.001, 1, planar=False)
+    local = np.abs(slab.to_local(points))
+    on_rims = np.isclose(local[:, 0], 0.051) | np.isclose(local[:, 1], 0.051)
+    on_faces = np.isclose(local[:, 2], 0.006)
+    assert np.all(on_rims | on_faces)
+    # the flux of a point charge through the rims: 1 - (the solid angle of the two faces) / 4π
+    a, c = 0.05, 0.005
+    faces = 2 * 4 * np.arcsin(a * a / (a * a + c * c))  # each face's solid angle from the centre
+    assert on_rims.mean() == pytest.approx(1 - faces / (4 * np.pi), abs=0.03)
