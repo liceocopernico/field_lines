@@ -104,3 +104,40 @@ def test_format_quantity():
     assert format_quantity(2e-9, "C") == "2.00 nC"
     assert format_quantity(-0.5, "V") == "-500 mV"
     assert format_quantity(0.0, "V") == "0 V"
+
+
+def test_ring_distance_and_nearest_surface_point():
+    from field_lines.sources import Ring
+
+    tube = Ring(0.0, [0.0, 0.0, 0.0], 0.02, 0.022, 0.05)  # 2 mm wall, 10 cm long
+    points = np.array([[0.01, 0, 0], [0.021, 0, 0], [0.0, 0.021, 0.06], [0.03, 0, 0.0]])
+    np.testing.assert_allclose(tube.distances(points), [0.01, 0.0, 0.01, 0.008], atol=1e-12)
+    # from inside the wall, out through the nearer cylinder; from the hole, onto the inner one
+    np.testing.assert_allclose(tube.surface_point(np.array([0.0205, 0, 0])), [0.02, 0, 0], atol=1e-12)
+    np.testing.assert_allclose(tube.surface_point(np.array([0, 0.0215, 0.01])), [0, 0.022, 0.01], atol=1e-12)
+    np.testing.assert_allclose(tube.surface_point(np.array([0.01, 0, 0.0])), [0.02, 0, 0], atol=1e-12)
+    disc = Ring(0.0, [0.0, 0.0, 0.0], 0.0, 0.05, 0.001, gap="w-")
+    np.testing.assert_allclose(disc.surface_point(np.array([0.0, 0.0, 0.0005])), [0, 0, 0.001], atol=1e-12)
+    assert disc.area == pytest.approx(np.pi * 0.05**2)
+    assert tube.area == pytest.approx(np.pi * (0.022**2 - 0.02**2))  # gap "w+" by default: a flat face
+    tube.gap = "out"
+    assert tube.area == pytest.approx(2 * np.pi * 0.022 * 0.1)
+    tube.gap = "in"
+    assert tube.area == pytest.approx(2 * np.pi * 0.02 * 0.1)
+
+
+def test_ring_entry_catches_steps_across_a_thin_wall():
+    from field_lines.sources import Ring
+
+    tube = Ring(0.0, [0.0, 0.0, 0.0], 0.02, 0.0205, 0.05)  # a 0.5 mm wall
+    p = np.array([[0.015, 0, 0], [0.0, 0.03, 0.0], [0.0, 0.0, -0.08], [0.019, 0, 0], [0.0202, 0, 0], [0.03, 0, 0.049]])
+    q = np.array([[0.03, 0, 0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.08], [0.0195, 0, 0], [0.03, 0, 0], [0.03, 0, 0.06]])
+    t = tube.entry(p, q)
+    assert t[0] == pytest.approx(5 / 15)  # out through the wall, from the hole: enters at ρ = 2 cm
+    assert t[1] == pytest.approx(0.95 / 2)  # in from outside: enters at ρ = 2.05 cm
+    assert np.isnan(t[2]) and np.isnan(t[3])  # along the axis, and within the hole: never in the wall
+    assert np.isnan(t[4])  # starting inside the wall
+    assert np.isnan(t[5])  # outside, past the end
+    disc = Ring(0.0, [0.0, 0.0, 0.0], 0.0, 0.05, 0.001)
+    t = disc.entry(np.array([[0.01, 0, 0.01], [0.06, 0, 0.0]]), np.array([[0.01, 0, -0.01], [0.04, 0, 0.0]]))
+    assert t[0] == pytest.approx(0.45) and t[1] == pytest.approx(0.5)  # the top face, the rim

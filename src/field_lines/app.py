@@ -23,7 +23,7 @@ from field_lines.interaction import (
 )
 from field_lines.panel import Panel, ViewOptions
 from field_lines.sampling import Exclusion
-from field_lines.scene import VIEW_HALF, Scene, charge_radius
+from field_lines.scene import VIEW_HALF, Scene, capacitor_axis, charge_radius
 from field_lines.sources import PointCharge
 from field_lines.strings import tr
 from field_lines.units import CM, NC, format_quantity
@@ -318,13 +318,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         exclusions = [Exclusion(c.position.copy(), charge_radius(c.q)) for c in self.scene.active_charges()]
         exclusions += [Exclusion(s.center.copy(), s.radius) for s in self.scene.active_spheres()]
-        conductors_model = self.scene.uses_conductor
+        # the conductors' field, and that of round plates (polygon sheets), are slow to evaluate
+        capacitor = self.scene.capacitor
+        slow_field = self.scene.uses_conductor or (capacitor is not None and capacitor.shape != "rect")
 
         def job():
             try:
                 if options.equipotentials:
                     resolution = None
-                    if conductors_model and not result.planar:
+                    if slow_field and not result.planar:
                         resolution = sampling.EQUIPOTENTIAL_RES_CONDUCTORS
                     result.equipotentials, _ = sampling.equipotentials(
                         model, result.planar, options.levels, exclusions, resolution
@@ -500,8 +502,10 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- panel ----------------------------------------------------------
 
     def _capacitor_edited(self) -> None:
-        normal = self.scene.capacitor.normal if self.scene.capacitor else ("x" if self.scene.planar else "z")
-        self.scene.capacitor = self.panel.capacitor(normal)
+        capacitor = self.panel.capacitor(self.scene.capacitor.normal if self.scene.capacitor else "z")
+        if capacitor is not None:
+            capacitor.normal = capacitor_axis(capacitor, self.scene.planar)
+        self.scene.capacitor = capacitor
         self._update_conductor()
         self.refresh(animate=False)
 
@@ -577,7 +581,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if solver is None:
             self._solve_timer.start()
         else:  # new potentials on a known geometry: a quick solve
-            scene.conductor = solver.solve(scene.voltages())
+            scene.conductor = scene.solve(solver)
 
     def _start_solve(self) -> None:
         if not self._computing():

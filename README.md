@@ -8,11 +8,15 @@ Two models:
 
 - **Point charges and charged sheets:** place charges, drag them, change
   them, and watch the field lines grow out of the positive charges and end
-  on the negative ones; a parallel plate capacitor whose plates carry a
-  uniform surface charge.
-- **Conductors at fixed potentials (Laplace):** metallic spheres and a
-  parallel plate capacitor, each held at its potential. Their charges are
-  solved, and the surfaces are coloured by their charge density.
+  on the negative ones; a capacitor whose plates carry a uniform surface
+  charge.
+- **Conductors at fixed potentials (Laplace):** metallic spheres, each held
+  at its potential, and a capacitor whose plates are held at a potential
+  difference. Their charges are solved, and the surfaces are coloured by
+  their charge density.
+
+The capacitor has flat plates, rectangular or circular, or is cylindrical:
+two coaxial tubes of finite length.
 
 In both, the capacitor's E, ΔV, Q and C are read out, and the field can be
 shown as field lines, equipotential surfaces (lines in 2D), an arrow grid,
@@ -24,6 +28,7 @@ and a movable plane coloured by V or |E|.
 uv run field-lines                      # 3D, dipole, language of the system
 uv run field-lines --mode 2d            # the 2D plane, like the old pygame app
 uv run field-lines --preset capacitor   # empty, single, dipole, equal, quadrupole, capacitor,
+                                        # disc_capacitor, cylindrical_capacitor,
                                         # sphere, two_spheres, sphere_in_capacitor
 uv run field-lines --lang en            # it or en
 ```
@@ -36,7 +41,8 @@ NumPy, SciPy).
 The panel on the right holds:
 
 - **2D / 3D:** going to 2D moves the charges and spheres onto the z = 0
-  plane and turns a capacitor so that its plates cross the plane.
+  plane and turns a capacitor so that its plates cross the plane (a
+  cylinder is cut across its axis or along it, as the capacitor form says).
 - **Model:** point charges and charged sheets, or conductors at fixed
   potentials.
 - **Setup:** ready-made setups. Those with spheres switch to the conductors
@@ -46,10 +52,21 @@ The panel on the right holds:
 - **Metal spheres** (conductors model): a table of potential V, radius and
   centre (cm), with each sphere's charge Q, plus buttons to add or remove
   spheres.
-- **Capacitor:** plate size, separation d (the gap between the plates'
-  inner faces), plate thickness (0.5 to 10 mm, 2 mm to start with), σ
-  (charges model) or ΔV (conductors model). Each plate is a closed slab,
-  growing outwards with its thickness.
+- **Capacitor:** the plates' shape, then
+  - flat rectangular plates: width, height and separation d (the gap
+    between the plates' inner faces);
+  - flat circular plates: radius and separation d;
+  - coaxial cylinders: the inner radius a (of the inner tube's outer face),
+    the outer radius b (of the outer tube's inner face), the length L, and
+    in 2D whether the plane cuts them across the axis (two rings, a radial
+    field) or along it (four strips, with the field leaking out of the open
+    ends);
+  - the plates' thickness (0.5 to 10 mm, 2 mm to start with): each plate is
+    a closed body, a slab, a disc or a tube, growing away from the gap (the
+    inner tube grows inwards, into a rod if it is thicker than a);
+  - σ of the positive plate (charges model; on a cylinder, of the inner
+    tube: the outer one gets the opposite charge, so σ·a/b) or ΔV
+    (conductors model).
 - **Show:** field lines (lines per nC), equipotentials (number of levels),
   arrows, the coloured plane (V or |E|, its axis and position), whether
   plates and spheres are coloured by their surface charge density (on to
@@ -103,7 +120,9 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
   lines of 3D point charges, cut by the plane, as in the old app.
 - From a plate or a sphere, lines start in proportion to the flux leaving
   each part of its surface. That is why only a few leave a plate's outer
-  face, and why on conductors they crowd where the charge does. The
+  face, and why on conductors they crowd where the charge does. On a
+  conductor in 3D the flux leaving each panel is its charge over ε₀, so the
+  solved charges give it without evaluating the field. The
   surface is cut in two again and again, each part with flux in proportion
   to the lines it gets, until each part has one line, which starts at the
   part's centre of flux: the lines spread evenly, not in rows.
@@ -136,17 +155,28 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
 **Uniform-σ plates.** E and V of a uniformly charged rectangle come from
 their closed-form integrals, not from summing many small charges. In the
 middle of a large capacitor this gives the textbook σ/ε₀ (checked in the
-tests). The charged sheet is the slab's inner face; the slab is drawn
-behind it, and the lines start from and end on the slab's surface.
+tests). A uniformly charged disc is a regular polygon of 48 sides, and a
+cylindrical sheet a prism of 48 flat strips, each counted with the exact
+field of a flat polygon; the polygon is a little larger than the circle, so
+that it has the same area and carries the same charge. 1 mm off the sheet
+this is within 0.5% of σ/ε₀ of the round sheet. The charged sheet is the
+plate's face towards the gap; the body is drawn behind it, and the lines
+start from and end on its surface.
 
-**Conductors.** Plates and spheres are held at their potentials (the
-plates at ±ΔV/2, each sphere at its V, all with respect to infinity), alone
-in empty space. Their charges are found on their surfaces (boundary
-elements, or the method of moments):
-- each surface is cut into small flat panels with a uniform σ: a plate is a
-  box, each large face cut into 21 × 21 panels, finer towards its edges,
-  and its four rims into strips across the thickness; a sphere into 384
-  panels, a cube projected onto it;
+**Conductors.** Each sphere is held at its potential V with respect to
+infinity, alone in empty space. The capacitor's plates are held ΔV apart
+and carry equal and opposite charges: they are at V₀ ± ΔV/2, with V₀ found
+so that their charges add up to zero (0 for symmetric plates; not for two
+coaxial tubes, where the larger outer one would otherwise take more charge
+from infinity). The charges are found on the surfaces (boundary elements,
+or the method of moments):
+- each surface is cut into small flat panels with a uniform σ: a
+  rectangular plate is a box, each large face cut into 21 × 21 panels,
+  finer towards its edges, and its four rims into strips across the
+  thickness; a disc or a tube has a polar grid of 40 panels around, a
+  disc's flat faces 12 rings of them finer towards the rim (triangles at the
+  centre), a tube up to 20 rows along it, finer towards its ends; a sphere
+  is cut into 384 panels, a cube projected onto it;
 - each panel counts with its true shape (the closed-form potential and field
   of a flat polygon). The cube's corners make kite-shaped panels on a
   sphere; counting them as squares had left σ 7% off there. Now an isolated
@@ -164,26 +194,31 @@ changing the plates, takes a fraction of a second (the solve runs in the
 background, and the old lines stay meanwhile). Spheres may not touch each
 other or the plates. In this model the point charges do not take part.
 
-From the panels' charges the panel shows Q, C = Q/ΔV (larger than ε₀A/d
-because of fringing, and a little larger with thicker plates, whose rims
-also carry charge) and each sphere's Q. Each face of a plate carries
-σ = ε₀ E just outside it. The inner faces carry σ = ε₀ΔV/d in the middle,
-the outer faces much less, and the charge crowds towards the edges and onto
-the rims.
+From the panels' charges the panel shows Q, C = Q/ΔV (larger than the
+ideal value because of fringing, and a little larger with thicker plates,
+whose rims also carry charge) and each sphere's Q. Each face of a plate
+carries σ = ε₀ E just outside it. The inner faces of flat plates carry
+σ = ε₀ΔV/d in the middle, the outer faces much less, and the charge crowds
+towards the edges and onto the rims. Between two tubes the field falls off
+as 1/r, and inside the inner tube, away from its open ends, there is
+hardly any charge.
 
-Coloured by density, a plate shows each of its six faces with its own σ; in
-2D its cut through the plane is a rectangle, its inner half coloured by the
-inner face, its outer half by the outer face, and its ends by the rims. A
-sphere shows its whole surface in 3D, a ring along its cut in 2D. A
-grounded sphere between the plates has no net charge, but is negative on
-the side facing the + plate and positive on the other. A uniform-σ plate is
-one colour.
+Coloured by density, a plate shows each of its faces with its own σ. In 2D
+its cut through the plane is a rectangle, its half towards the gap coloured
+by that face, its other half by the opposite face, and its ends by the rims;
+a tube cut across its axis is a ring, its inner and outer halves coloured by
+its two cylinders (a rod is grey inside, with a coloured rim). A sphere
+shows its whole surface in 3D, a ring along its cut in 2D. A grounded sphere
+between the plates has no net charge, but is negative on the side facing the
++ plate and positive on the other. A uniform-σ plate is one colour.
 
 **Readouts.**
-- E at the centre.
-- σ/ε₀ with σ = Q/A, the field of infinite plates with the same charge.
-- ΔV between the centres of the plates' inner faces.
-- Q, C, and ε₀A/d.
+- Flat plates: E at the centre, against σ/ε₀ with σ = Q/A, the field of
+  infinite plates with the same charge; ΔV between the centres of the
+  plates' inner faces; Q, C, and ε₀A/d.
+- Cylinder: E halfway across the gap in the middle of its length, against
+  λ/(2πε₀r) with λ = Q/L, the field of infinite tubes; ΔV between the two
+  tubes' faces across the gap; Q, C, and 2πε₀L/ln(b/a).
 
 ## Tests
 
@@ -200,7 +235,12 @@ uv run pytest
   - an isolated sphere: Q = 4πε₀RV, uniform σ = ε₀V/R, the field of a point
     charge outside and none inside;
   - the plates at ±ΔV/2, the gap field ΔV/d, Q₊ = −Q₋, a dipole far away;
-  - convergence of C, and agreement with Kirchhoff's fringing estimate;
+  - convergence of C, and agreement with Kirchhoff's fringing estimate,
+    for square and for circular plates;
+  - two coaxial tubes: equal and opposite charges at the asked ΔV, a 1/r
+    field across the gap, C above 2πε₀L/ln(b/a), no charge inside;
+  - the polygon and prism sheets against a uniformly charged disc's exact
+    field on its axis and a long tube's λ/(2πε₀r);
   - more charge at the edges, and the two faces adding up;
   - Gauss's law around each plate;
   - the grounded sphere between the plates: neutral, charged on each side;
@@ -218,7 +258,7 @@ dragging a charge or a sphere, and the keys.
 ```
 src/field_lines/
   units.py        SI constants, display units, formatting of readouts
-  sources.py      point charges and uniformly charged plates (closed form)
+  sources.py      point charges, plates (closed form), discs and tubes (their geometry)
   conductors.py   conductors at fixed potentials: surface charges by boundary elements
   seeding.py      where lines start (number proportional to charge or flux)
   tracing.py      vectorized RK4 tracing with its stopping rules

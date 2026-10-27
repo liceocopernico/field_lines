@@ -91,7 +91,13 @@ def test_language_switch_changes_every_label(window):
     getters = {"setText": "text", "setTitle": "title", "setToolTip": "toolTip"}
     for setter, key in window.panel._texts:
         assert getattr(setter.__self__, getters[setter.__name__])() == tr(key)
+    for label, key in window.panel._shaped_texts:
+        assert label.text() == tr(key)
     assert window.panel.preset_combo.itemText(window.panel.preset_combo.findData("dipole")) == "Dipole"
+    window.panel.shape_combo.setCurrentIndex(window.panel.shape_combo.findData("cylinder"))
+    for label, key in window.panel._shaped_texts:  # the readouts of a cylinder, in English
+        assert label.text() == tr(window.panel.shaped_key(key))
+    assert tr("readout_C_ideal_cylinder") in [label.text() for label, _ in window.panel._shaped_texts]
 
 
 def wait_for_fields(window, qtbot):
@@ -427,3 +433,34 @@ def test_status_light_in_the_status_bar(window, qtbot):
     assert window.status_light.text() == tr("updating_views") and window.status_light.flashing()
     wait_for_fields(window, qtbot)
     assert window.status_light.state == "ready"
+
+
+def test_capacitor_shapes_in_the_panel(window, qtbot):
+    panel = window.panel
+    window.load_preset("capacitor")
+
+    def shown(widget):
+        return panel.capacitor_rows.isRowVisible(widget)
+
+    assert shown(panel.width_box) and not shown(panel.radius_box) and not shown(panel.length_box)
+    panel.shape_combo.setCurrentIndex(panel.shape_combo.findData("disc"))
+    assert window.scene.capacitor.shape == "disc" and shown(panel.radius_box) and not shown(panel.width_box)
+    assert len(window.view.plate_actors) == 6  # two discs, three faces each
+    panel.shape_combo.setCurrentIndex(panel.shape_combo.findData("cylinder"))
+    assert shown(panel.inner_radius_box) and shown(panel.outer_radius_box) and not shown(panel.separation_box)
+    assert not shown(panel.cut_combo)  # only in 2D
+    assert panel.readouts["readout_C"].text() != "—"
+    texts = [label.text() for label, _ in panel._shaped_texts]
+    assert tr("readout_C_ideal_cylinder") in texts and tr("sigma_cylinder") in texts
+    panel.inner_radius_box.setValue(5.0)
+    assert panel.outer_radius_box.value() >= 5.2  # the outer tube stays outside the inner one
+    in_2d(window)
+    assert shown(panel.cut_combo) and window.scene.capacitor.normal == "z"  # cut across: two rings
+    panel.cut_combo.setCurrentIndex(panel.cut_combo.findData("along"))
+    assert window.scene.capacitor.normal == "x"
+    window.load_preset("cylindrical_capacitor")
+    assert panel.shape_combo.currentData() == "cylinder" and panel.inner_radius_box.value() == 2.0
+    window.panel.radio_conductors.setChecked(True)
+    wait_for_solve(window, qtbot)
+    assert window.panel.readouts["readout_dV"].text() == "500 V"
+    assert all(line.end == "plate" for line in window.view.lines)

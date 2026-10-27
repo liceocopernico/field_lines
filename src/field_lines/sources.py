@@ -46,14 +46,43 @@ class PointCharge:
             return np.where(d > 0, K * self.q / np.where(d > 0, d, 1.0), 0.0)
 
 
+class LocalFrame:
+    """Local coordinates (u, v, w) about a body's centre, w along its normal axis.
+
+    (u, v, w) follows the axes cyclically: normal z -> (x, y, z), normal x -> (y, z, x), normal y -> (z, x, y).
+    """
+
+    center: np.ndarray
+    normal: str
+
+    def _set_frame(self) -> None:
+        self.center = np.asarray(self.center, dtype=float)
+        a = AXES.index(self.normal)
+        self.local_axes = [(a + 1) % 3, (a + 2) % 3, a]
+
+    def to_local(self, points: np.ndarray) -> np.ndarray:
+        return (points - self.center)[:, self.local_axes]
+
+    def from_local(self, vectors: np.ndarray) -> np.ndarray:
+        out = np.empty_like(vectors)
+        out[:, self.local_axes] = vectors
+        return out
+
+    def surface_point(self, point: np.ndarray) -> np.ndarray:
+        """The point of the body's surface nearest to point (from outside, or from inside it)."""
+        return self.surface_points(point[None])[0]
+
+    def distance(self, point: np.ndarray) -> float:
+        """Distance from the body (0 inside it)."""
+        return float(self.distances(point[None])[0])
+
+
 @dataclass
-class Plate:
+class Plate(LocalFrame):
     """A rectangle with uniform surface charge density sigma (C/m²).
 
     The plate lies across its normal axis. In local coordinates (u, v, w) it
-    spans |u| <= width/2, |v| <= height/2, w = 0, where w is the normal axis
-    and (u, v, w) follows the axes cyclically: normal z -> (x, y, z),
-    normal x -> (y, z, x), normal y -> (z, x, y).
+    spans |u| <= width/2, |v| <= height/2, w = 0.
 
     With a thickness the plate is a slab, |w| <= thickness/2: a box-shaped
     conductor in the conductors model. Its field and potential here are those
@@ -69,40 +98,52 @@ class Plate:
     thickness: float = 0.0
 
     def __post_init__(self):
-        self.center = np.asarray(self.center, dtype=float)
-        a = AXES.index(self.normal)
-        self.local_axes = [(a + 1) % 3, (a + 2) % 3, a]
+        self._set_frame()
+
+    @property
+    def area(self) -> float:
+        return self.width * self.height
 
     @property
     def charge(self) -> float:
-        return self.sigma * self.width * self.height
-
-    def to_local(self, points: np.ndarray) -> np.ndarray:
-        return (points - self.center)[:, self.local_axes]
-
-    def from_local(self, vectors: np.ndarray) -> np.ndarray:
-        out = np.empty_like(vectors)
-        out[:, self.local_axes] = vectors
-        return out
+        return self.sigma * self.area
 
     @property
     def half(self) -> np.ndarray:
         """Half sizes along local u, v, w."""
         return np.array([self.width / 2, self.height / 2, self.thickness / 2])
 
-    def surface_point(self, point: np.ndarray) -> np.ndarray:
-        """The point of the plate's surface nearest to point (from outside, or from inside the slab)."""
-        local = self.to_local(point[None])[0]
-        nearest = np.clip(local, -self.half, self.half)
-        if np.array_equal(nearest, local):  # inside: out through the nearest face
-            k = int(np.argmin(self.half - np.abs(local)))
-            nearest[k] = (1.0 if local[k] >= 0 else -1.0) * self.half[k]
-        return self.from_local(nearest[None])[0] + self.center
+    def key(self) -> tuple:
+        """What its shape and place are (for telling geometries apart)."""
+        return ("plate", tuple(np.round(self.center, 9)), *np.round(self.half, 9), self.normal)
 
-    def distance(self, point: np.ndarray) -> float:
-        """Distance from the plate (0 inside the slab)."""
-        local = self.to_local(point[None])[0]
-        return float(np.linalg.norm(local - np.clip(local, -self.half, self.half)))
+    def surface_points(self, points: np.ndarray) -> np.ndarray:
+        local = self.to_local(points)
+        nearest = np.clip(local, -self.half, self.half)
+        inside = np.flatnonzero(np.all(nearest == local, axis=1))  # out through the nearest face
+        k = np.argmin(self.half - np.abs(nearest[inside]), axis=1)
+        nearest[inside, k] = np.where(nearest[inside, k] >= 0, 1.0, -1.0) * self.half[k]
+        return self.from_local(nearest) + self.center
+
+    def distances(self, points: np.ndarray) -> np.ndarray:
+        local = self.to_local(points)
+        return np.linalg.norm(local - np.clip(local, -self.half, self.half), axis=1)
+
+    def entry(self, p: np.ndarray, p_new: np.ndarray) -> np.ndarray:
+        """Where each step from p to p_new enters the plate, as a fraction of the step; nan where it does not."""
+        a = self.to_local(p)
+        d = self.to_local(p_new) - a
+        half = self.half
+        # where the step enters and leaves each band |u| <= a, |v| <= b, |w| <= t/2 (slab method)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            t1, t2 = (-half - a) / d, (half - a) / d
+        still = d == 0  # parallel to a band: inside it all along, or never
+        within = np.abs(a) <= half
+        t_in = np.where(still, np.where(within, -np.inf, np.inf), np.minimum(t1, t2)).max(axis=1)
+        t_out = np.where(still, np.where(within, np.inf, -np.inf), np.maximum(t1, t2)).min(axis=1)
+        outside = np.any(np.abs(a) > half, axis=1)
+        enters = outside & (t_in <= t_out) & (t_in >= 0) & (t_in <= 1)
+        return np.where(enters, t_in, np.nan)
 
     def field(self, points: np.ndarray) -> np.ndarray:
         u, v, w = self.to_local(points).T
@@ -116,6 +157,103 @@ class Plate:
     def field_ideal(self) -> float:
         """|E| next to an infinite plate with the same σ: σ / (2 ε₀)."""
         return abs(self.sigma) / (2 * EPS0)
+
+
+@dataclass
+class Ring(LocalFrame):
+    """A body of revolution about its normal axis: r_in <= ρ <= r_out, |w| <= half_length.
+
+    ρ is the distance from the axis, w the local coordinate along it. A disc
+    shaped plate has r_in = 0, a tube r_in > 0. Of zero thickness it is a
+    sheet: a flat disc or annulus (half_length = 0) or a cylindrical surface
+    (r_in = r_out).
+
+    gap names the face towards the other conductor of a capacitor: "w+" or
+    "w-" (the flat faces), "out" (ρ = r_out) or "in" (ρ = r_in). σ refers to
+    that face's area; in the charges model σ sits on it (a sheet), and its
+    field is in conductors.UniformSheet.
+    """
+
+    sigma: float
+    center: np.ndarray
+    r_in: float
+    r_out: float
+    half_length: float
+    normal: str = "z"
+    gap: str = "w+"
+
+    def __post_init__(self):
+        self._set_frame()
+
+    @property
+    def area(self) -> float:
+        if self.gap in ("w+", "w-"):
+            return np.pi * (self.r_out**2 - self.r_in**2)
+        return 2 * np.pi * (self.r_out if self.gap == "out" else self.r_in) * 2 * self.half_length
+
+    @property
+    def charge(self) -> float:
+        return self.sigma * self.area
+
+    def key(self) -> tuple:
+        sizes = np.round([self.r_in, self.r_out, self.half_length], 9)
+        return ("ring", tuple(np.round(self.center, 9)), *sizes, self.normal)
+
+    def meridian(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """ρ and w of the points, and their local (u, v)."""
+        local = self.to_local(points)
+        return np.hypot(local[:, 0], local[:, 1]), local[:, 2], local[:, :2]
+
+    def distances(self, points: np.ndarray) -> np.ndarray:
+        rho, w, _ = self.meridian(points)
+        d_rho = np.maximum(np.maximum(self.r_in - rho, rho - self.r_out), 0.0)
+        d_w = np.maximum(np.abs(w) - self.half_length, 0.0)
+        return np.hypot(d_rho, d_w)
+
+    def surface_points(self, points: np.ndarray) -> np.ndarray:
+        rho, w, uv = self.meridian(points)
+        h = self.half_length
+        near_rho, near_w = np.clip(rho, self.r_in, self.r_out), np.clip(w, -h, h)
+        inside = (near_rho == rho) & (near_w == w)
+        # from inside, out through the nearest face: the inner cylinder (if any), the outer one, or a flat face
+        to_inner = rho - self.r_in if self.r_in > 0 else np.full(len(rho), np.inf)
+        gaps = np.column_stack((to_inner, self.r_out - rho, h - np.abs(w)))
+        face = np.argmin(gaps, axis=1)
+        near_rho = np.where(inside & (face == 0), self.r_in, near_rho)
+        near_rho = np.where(inside & (face == 1), self.r_out, near_rho)
+        near_w = np.where(inside & (face == 2), np.where(w >= 0, h, -h), near_w)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            radial = np.where(rho[:, None] > 0, uv / rho[:, None], [1.0, 0.0])  # on the axis: any direction
+        local = np.column_stack((near_rho[:, None] * radial, near_w))
+        return self.from_local(local) + self.center
+
+    def entry(self, p: np.ndarray, p_new: np.ndarray) -> np.ndarray:
+        """Where each step from p to p_new enters the body, as a fraction of the step; nan where it does not.
+
+        The first crossing of any of its faces, for steps that start outside:
+        the flat faces at w = ±half_length (linear in the step) and the
+        cylinders at ρ = r_in and r_out (quadratic).
+        """
+        a = self.to_local(p)
+        d = self.to_local(p_new) - a
+        h = self.half_length
+        first = np.full(len(p), np.inf)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            for side in (-h, h):
+                t = (side - a[:, 2]) / d[:, 2]
+                rho = np.hypot(a[:, 0] + t * d[:, 0], a[:, 1] + t * d[:, 1])
+                hit = (t >= 0) & (t <= 1) & (rho >= self.r_in) & (rho <= self.r_out)
+                first = np.where(hit & (t < first), t, first)
+            qa = d[:, 0] ** 2 + d[:, 1] ** 2
+            qb = a[:, 0] * d[:, 0] + a[:, 1] * d[:, 1]
+            for radius in {self.r_in, self.r_out} - {0.0}:
+                qc = a[:, 0] ** 2 + a[:, 1] ** 2 - radius**2
+                root = np.sqrt(qb * qb - qa * qc)
+                for t in ((-qb - root) / qa, (-qb + root) / qa):
+                    hit = (t >= 0) & (t <= 1) & (np.abs(a[:, 2] + t * d[:, 2]) <= h)
+                    first = np.where(hit & (t < first), t, first)
+        enters = (self.distances(p) > 0) & np.isfinite(first)
+        return np.where(enters, first, np.nan)
 
 
 class Superposition:

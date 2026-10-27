@@ -7,7 +7,7 @@ keeps the model that is on.
 """
 
 from field_lines.conductors import Sphere
-from field_lines.scene import Capacitor, Scene
+from field_lines.scene import Capacitor, Scene, capacitor_axis
 from field_lines.sources import PointCharge
 from field_lines.units import CM, NC
 
@@ -24,6 +24,8 @@ PRESETS: dict[str, dict] = {
     "sphere": dict(spheres=[(1000, 2, 0, 0)]),
     "two_spheres": dict(spheres=[(1000, 1.5, -4, 0), (-1000, 1.5, 4, 0)]),
     "sphere_in_capacitor": dict(capacitor=True, spheres=[(0, 1.5, 0, 0)], gap=6),
+    "disc_capacitor": dict(capacitor=True, shape="disc"),
+    "cylindrical_capacitor": dict(capacitor=True, shape="cylinder"),
 }
 
 
@@ -34,7 +36,8 @@ def load(scene: Scene, key: str) -> None:
     scene.spheres = [Sphere([x * CM, y * CM, 0.0], r * CM, V) for V, r, x, y in preset.get("spheres", [])]
     scene.capacitor = None
     if preset.get("capacitor"):
-        scene.capacitor = Capacitor(normal="x" if scene.planar else "z")
+        scene.capacitor = Capacitor(shape=preset.get("shape", "rect"))
+        scene.capacitor.normal = capacitor_axis(scene.capacitor, scene.planar)
         if "gap" in preset:
             scene.capacitor.separation = preset["gap"] * CM
     if "charges" in preset:

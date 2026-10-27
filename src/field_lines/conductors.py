@@ -12,6 +12,10 @@ outside the conductors with V -> 0 far away, without a grid.
   has its own charge. (A plate of zero thickness is one sheet of panels; its
   two faces are told apart afterwards: each carries σ/2 plus or minus ε₀
   times the field of all the other panels across it.)
+- A disc-shaped plate or a tube (a Ring, a body of revolution) has a polar
+  grid of RING_SEGMENTS panels around: a disc's flat faces DISC_PANELS rings
+  of them, finer towards the rim (triangles at the centre), a tube up to
+  TUBE_PANELS rows along it, finer towards its ends.
 - A sphere is a cube projected onto it: 6 faces of SPHERE_PANELS x
   SPHERE_PANELS panels.
 
@@ -38,11 +42,15 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve
 
-from field_lines.sources import Plate
+from field_lines.sources import Plate, Ring
 from field_lines.units import EPS0, K
 
 PLATE_PANELS = 21  # per side of a plate's face; odd, so that a row of panels lies on each centre line
 SPHERE_PANELS = 8  # per edge of each of the six faces of the cube
+RING_SEGMENTS = 40  # panels around a disc or a tube
+DISC_PANELS = 12  # rings of panels on a disc's flat face, from the centre to the rim
+TUBE_PANELS = 20  # rows of panels along a tube, at most
+SHEET_SIDES = 48  # in the charges model a disc is a polygon, a cylindrical sheet a prism, of this many sides
 NEAR = 4.0  # closer than this many panel sizes, a panel is a rectangle, not a point charge
 CHUNK = 1000  # points per block of point-panel pairs
 PLATE_BLOCK = 3  # a plate face's clusters are blocks of 3 x 3 panels (smaller: fewer panels one by one near a slab)
@@ -167,6 +175,125 @@ def plate_panels(plate: Plate, owner: int, n: int | None = None) -> Panels:
     return Panels(plate.from_local(local) + plate.center, normals, corners, np.full(uu.size, owner))
 
 
+def _ring_panels_from(ring: Ring, corners: np.ndarray, normals: np.ndarray, owner: int) -> Panels:
+    """Panels from corners (N, 4, 3) and normals (N, 3) in the ring's local coordinates.
+
+    Each panel's centre is its centroid; a triangle is a quad with two corners alike.
+    """
+    a, b, c, d = (corners[:, k] for k in range(4))
+    areas = [0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1), 0.5 * np.linalg.norm(np.cross(c - a, d - a), axis=1)]
+    centroids = [(a + b + c) / 3, (a + c + d) / 3]
+    center = (areas[0][:, None] * centroids[0] + areas[1][:, None] * centroids[1]) / (areas[0] + areas[1])[:, None]
+    count = len(corners)
+    normals = ring.from_local(normals)
+    rel = ring.from_local((corners - center[:, None, :]).reshape(-1, 3)).reshape(count, 4, 3)
+    rel = _counter_clockwise(rel, normals)
+    return Panels(ring.from_local(center) + ring.center, normals, rel, np.full(count, owner))
+
+
+def ring_face_grid(ring: Ring, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """The panel edges of one face of a ring: along it (ρ on a flat face, w on a cylinder) and around (φ)."""
+    h, r_in, r_out = ring.half_length, ring.r_in, ring.r_out
+    target = 2 * np.pi * r_out / RING_SEGMENTS  # about the panels' width around the rim
+    phi = np.linspace(0.0, 2 * np.pi, RING_SEGMENTS + 1)
+    if name in ("w+", "w-"):
+        if r_in == 0:  # a disc: finer towards the rim
+            return r_out * np.sin(np.linspace(0.0, np.pi / 2, DISC_PANELS + 1)), phi
+        count = max(1, round((r_out - r_in) / target))
+        return (r_in + r_out) / 2 + panel_edges((r_out - r_in) / 2, count), phi
+    count = min(TUBE_PANELS, max(1, round(2 * h / target)))
+    return panel_edges(h, count), phi
+
+
+def ring_panels(ring: Ring, owner: int) -> tuple[Panels, dict]:
+    """The faces of a solid ring: its flat faces "w+" and "w-", the cylinders "out" and (a tube's) "in".
+
+    Returns the panels and the layout: for each face, its first panel and grid shape (along, around).
+    """
+    h, r_in, r_out = ring.half_length, ring.r_in, ring.r_out
+    assert h > 0 and r_out > r_in, "a conductor has a thickness"
+    names = ["w+", "w-", "out"] + (["in"] if r_in > 0 else [])
+    parts, layout, first = [], {}, 0
+    for name in names:
+        s, phi = ring_face_grid(ring, name)
+        ss, pp = np.meshgrid(s, phi, indexing="ij")
+        corner_index = [(0, 0), (1, 0), (1, 1), (0, 1)]  # (along, around) offsets, counter-clockwise for "w+"
+        cs = np.stack([ss[i : len(s) - 1 + i, j : len(phi) - 1 + j] for i, j in corner_index], axis=-1)
+        cp = np.stack([pp[i : len(s) - 1 + i, j : len(phi) - 1 + j] for i, j in corner_index], axis=-1)
+        cs, cp = cs.reshape(-1, 4), cp.reshape(-1, 4)
+        mid = (phi[1:] + phi[:-1]) / 2
+        mid = np.tile(mid, len(s) - 1)
+        if name in ("w+", "w-"):
+            side = 1.0 if name == "w+" else -1.0
+            corners = np.stack((cs * np.cos(cp), cs * np.sin(cp), np.full(cs.shape, side * h)), axis=-1)
+            normals = np.tile([0.0, 0.0, side], (len(mid), 1))
+        else:
+            radius, side = (r_out, 1.0) if name == "out" else (r_in, -1.0)
+            corners = np.stack((radius * np.cos(cp), radius * np.sin(cp), cs), axis=-1)
+            normals = side * np.column_stack((np.cos(mid), np.sin(mid), np.zeros(len(mid))))
+        layout[name] = (first, (len(s) - 1, len(phi) - 1))
+        first += len(mid)
+        parts.append(_ring_panels_from(ring, corners, normals, owner))
+    return _join(parts), layout
+
+
+def sheet_panels(ring: Ring) -> Panels:
+    """A disc (or annulus) sheet as a regular polygon of SHEET_SIDES sides, a cylindrical sheet as a prism.
+
+    The polygon is a little larger than the circle, so that it has the same
+    area (the prism the same perimeter): the same σ then carries the same charge.
+    """
+    theta = np.linspace(0.0, 2 * np.pi, SHEET_SIDES + 1)
+    h = ring.half_length
+    n = SHEET_SIDES
+    grow = np.sqrt(2 * np.pi / (n * np.sin(2 * np.pi / n))) if h == 0 else np.pi / (n * np.sin(np.pi / n))
+    r_in, r_out = grow * ring.r_in, grow * ring.r_out
+    zero = np.zeros(SHEET_SIDES // 2)
+    if h == 0 and r_in == 0:  # quads from the centre, each over two sides
+        k = np.arange(0, SHEET_SIDES, 2)
+        rim = [theta[k + i] for i in (0, 1, 2)]
+        corners = [np.column_stack((zero, zero, zero))]
+        corners += [np.column_stack((r_out * np.cos(angle), r_out * np.sin(angle), zero)) for angle in rim]
+        normals = np.tile([0.0, 0.0, 1.0], (len(k), 1))
+    elif h == 0:
+        c0, c1 = np.cos(theta[:-1]), np.cos(theta[1:])
+        s0, s1 = np.sin(theta[:-1]), np.sin(theta[1:])
+        z = np.zeros(SHEET_SIDES)
+        corners = [np.column_stack(c) for c in ((r_in * c0, r_in * s0, z), (r_out * c0, r_out * s0, z),
+                                                 (r_out * c1, r_out * s1, z), (r_in * c1, r_in * s1, z))]
+        normals = np.tile([0.0, 0.0, 1.0], (SHEET_SIDES, 1))
+    else:
+        assert r_in == r_out, "a sheet has no thickness"
+        c0, c1 = np.cos(theta[:-1]), np.cos(theta[1:])
+        s0, s1 = np.sin(theta[:-1]), np.sin(theta[1:])
+        lo, hi = np.full(SHEET_SIDES, -h), np.full(SHEET_SIDES, h)
+        corners = [np.column_stack(c) for c in ((r_out * c0, r_out * s0, lo), (r_out * c1, r_out * s1, lo),
+                                                 (r_out * c1, r_out * s1, hi), (r_out * c0, r_out * s0, hi))]
+        mid = (theta[1:] + theta[:-1]) / 2
+        normals = np.column_stack((np.cos(mid), np.sin(mid), np.zeros(SHEET_SIDES)))
+    return _ring_panels_from(ring, np.stack(corners, axis=1), normals, 0)
+
+
+class UniformSheet:
+    """A uniformly charged disc or cylindrical sheet (a Ring of zero thickness), for the charges model.
+
+    It is a regular polygon or a prism of SHEET_SIDES flat panels (sheet_panels),
+    each counted with the exact field of a flat polygon, so the field is right
+    also right next to the sheet, and it carries the charge of the round sheet.
+    """
+
+    def __init__(self, ring: Ring):
+        self.ring = ring
+        self.panels = sheet_panels(ring)
+        self.sigma = np.full(len(self.panels), ring.sigma)
+
+    def field(self, points: np.ndarray) -> np.ndarray:
+        return evaluate(self.panels, self.sigma, points, potential=False)[1]
+
+    def potential(self, points: np.ndarray) -> np.ndarray:
+        return evaluate(self.panels, self.sigma, points, field=False)[0]
+
+
 def sphere_mesh(center: np.ndarray, radius: float, m: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Corner points (6 (m+1)², 3) and quads (6 m², 4) of a cube projected onto the sphere.
 
@@ -226,7 +353,8 @@ def polygon_terms(rel: np.ndarray, corners: np.ndarray, normal: np.ndarray, fiel
         a, b = corners[:, e], corners[:, (e + 1) % k]
         edge = b - a
         length = np.linalg.norm(edge, axis=1)
-        along = edge / length[:, None]
+        real = length > 0  # a triangle is a quad with two corners alike: one of its edges has no length
+        along = edge / np.where(real, length, 1.0)[:, None]
         out = np.cross(along, normal)  # in the plane, out of the polygon
         l_minus = np.einsum("pk,pk->p", a - foot, along)
         l_plus = l_minus + length
@@ -235,9 +363,9 @@ def polygon_terms(rel: np.ndarray, corners: np.ndarray, normal: np.ndarray, fiel
         r_minus = np.sqrt(l_minus**2 + r0**2)
         r_plus = np.sqrt(l_plus**2 + r0**2)
         with np.errstate(divide="ignore", invalid="ignore"):
-            log_term = np.where(r0 > 0, np.arcsinh(l_plus / r0) - np.arcsinh(l_minus / r0), 0.0)
+            log_term = np.where(real & (r0 > 0), np.arcsinh(l_plus / r0) - np.arcsinh(l_minus / r0), 0.0)
             angle = np.where(
-                r0 > 0,
+                real & (r0 > 0),
                 np.arctan2(p0 * l_plus, r0**2 + aw * r_plus) - np.arctan2(p0 * l_minus, r0**2 + aw * r_minus),
                 0.0,
             )
@@ -392,7 +520,12 @@ class Solver:
         parts, groups, first = [], [], 0
         self.layouts: list[dict | None] = []  # for each plate, where its faces' panels are (None: a sheet)
         for k, plate in enumerate(self.plates):
-            if plate.thickness > 0:
+            if isinstance(plate, Ring):
+                panels, layout = ring_panels(plate, k)
+                for start, shape in layout.values():
+                    groups += _blocks(first + start, *shape, PLATE_BLOCK)
+                self.layouts.append({name: (first + start, shape) for name, (start, shape) in layout.items()})
+            elif plate.thickness > 0:
                 panels, layout = box_panels(plate, k)
                 for start, shape in layout.values():
                     groups += _blocks(first + start, *shape, PLATE_BLOCK)
@@ -412,10 +545,22 @@ class Solver:
         self.lu = lu_factor(interaction_matrix(self.panels), check_finite=False)
         self.clusters = make_clusters(self.panels, groups)
 
-    def solve(self, voltages: Sequence[float]) -> "ConductorSolution":
-        """The charges for the conductors at these potentials (one per conductor, plates first)."""
+    def solve(self, voltages: Sequence[float], neutral: Sequence[int] = ()) -> "ConductorSolution":
+        """The charges for the conductors at these potentials (one per conductor, plates first).
+
+        neutral: conductors whose potentials all shift by the same amount, so
+        that their charges add up to zero (a capacitor's plates: equal and
+        opposite charges, the potential difference unchanged).
+        """
         voltages = np.asarray(voltages, dtype=float)
         sigma = lu_solve(self.lu, voltages[self.panels.owner], check_finite=False)
+        if len(neutral):
+            mine = np.isin(self.panels.owner, neutral)
+            unit = lu_solve(self.lu, mine.astype(float), check_finite=False)  # all of them at 1 V, the rest at 0
+            shift = -(sigma * self.panels.area)[mine].sum() / (unit * self.panels.area)[mine].sum()
+            sigma = sigma + shift * unit
+            voltages = voltages.copy()
+            voltages[list(neutral)] += shift
         return ConductorSolution(self, sigma, voltages)
 
 
@@ -457,18 +602,23 @@ class ConductorSolution:
         return self.sigma[self.panels.owner == len(self.solver.plates) + k]
 
     def face(self, plate: int, name: str) -> np.ndarray:
-        """σ on one face of a box plate ("w+", "w-", "u+", "u-", "v+", "v-") as its grid of panels."""
+        """σ on one face of a box plate ("w+", "w-", "u+", "u-", "v+", "v-") or of a ring ("w+", "w-",
+        "out", "in"), as its grid of panels."""
         start, shape = self.solver.layouts[plate][name]
         return self.sigma[start : start + shape[0] * shape[1]].reshape(shape)
 
-    def _plate_faces(self) -> list[tuple[np.ndarray, np.ndarray]]:
-        """σ on each plate's inner face (towards the origin, where the other plate is) and outer face.
+    def _plate_faces(self) -> list[tuple[np.ndarray, np.ndarray] | None]:
+        """σ on each rectangular plate's inner face (towards the origin, where the other plate is) and outer face.
 
         A box plate has its faces' own panels. On a sheet, each face carries σ/2 ± ε₀ E·n,
         with E the field at the panel's centre: a panel's own field has no component across it there.
+        A ring has None here: its faces are in face().
         """
         faces = []
         for k, plate in enumerate(self.solver.plates):
+            if isinstance(plate, Ring):
+                faces.append(None)
+                continue
             if self.solver.layouts[k] is not None:
                 plus_side = plate.center @ plate.from_local(np.array([[0.0, 0.0, 1.0]]))[0] > 0
                 inner, outer = ("w-", "w+") if plus_side else ("w+", "w-")
@@ -486,13 +636,7 @@ class ConductorSolution:
 
 def geometry_key(plates: Sequence[Plate], spheres: Sequence[Sphere]) -> tuple:
     """What the interaction matrix depends on (not the potentials)."""
-    return (
-        tuple(
-            (tuple(np.round(p.center, 9)), round(p.width, 9), round(p.height, 9), p.normal, round(p.thickness, 9))
-            for p in plates
-        ),
-        tuple((tuple(np.round(s.center, 9)), round(s.radius, 9)) for s in spheres),
-    )
+    return tuple(p.key() for p in plates), tuple((tuple(np.round(s.center, 9)), round(s.radius, 9)) for s in spheres)
 
 
 def touching(plates: Sequence[Plate], spheres: Sequence[Sphere], gap: float = 1e-3) -> bool:

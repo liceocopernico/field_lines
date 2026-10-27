@@ -13,7 +13,7 @@ from field_lines.scene import VIEW_HALF
 from field_lines.sources import AXES, FieldModel
 
 EQUIPOTENTIAL_RES_3D = 72  # grid points per side
-EQUIPOTENTIAL_RES_CONDUCTORS = 48  # in 3D in the conductors model, whose field is slower to evaluate (~1.5 s)
+EQUIPOTENTIAL_RES_CONDUCTORS = 48  # in 3D when the field is slow to evaluate: conductors, discs and tubes (~1.5-3 s)
 EQUIPOTENTIAL_RES_2D = 241
 ARROWS_3D = 9
 ARROWS_2D = 17

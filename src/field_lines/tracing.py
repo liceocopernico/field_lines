@@ -8,10 +8,11 @@ distance, so that a line can make a loop metres wide and come back in a few
 hundred steps. A line stops when it
 
 - comes within r_stop of a point charge ("sink"),
-- enters a plate (a sheet or a slab) whose charge has the opposite sign, or
-  comes within plate_margin of it ("plate"); near a charged sheet the field
-  flips, and a step across it would stall. With plates_absorb every plate
-  stops lines (they are conductors, ending the lines that reach them),
+- enters a plate (a sheet, a slab, a disc or a tube) whose charge has the
+  opposite sign, or comes within plate_margin of it ("plate"); near a charged
+  sheet the field flips, and a step across it would stall. With plates_absorb
+  every plate stops lines (they are conductors, ending the lines that reach
+  them),
 - comes within plate_margin of a metallic sphere ("sphere"),
 - turns back on itself, finds no field or stops advancing: it reached a null point ("null"),
 - leaves the bounding box ("bounds") or gets longer than max_length ("length").
@@ -22,7 +23,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from field_lines.sources import FieldModel, Plate, PointCharge
+from field_lines.sources import FieldModel, PointCharge
 
 STEP_PER_DISTANCE = 0.3  # step / distance from the nearest point charge
 COS_MAX_TURN = np.cos(np.radians(25))  # a step may turn the line by at most this angle
@@ -51,7 +52,7 @@ def trace(
     r_stop: float,
     max_length: float,
     charges: Sequence[PointCharge] = (),
-    plates: Sequence[Plate] = (),
+    plates: Sequence = (),
     plates_absorb: bool = False,
     spheres: Sequence = (),
     plate_margin: float | None = None,
@@ -162,36 +163,21 @@ def _adaptive_rk4(model, p, k1, h, sign, step_min):
     return p_new
 
 
-def _plate_hit(plate: Plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray, margin: float, absorb: bool):
+def _plate_hit(plate, p: np.ndarray, p_new: np.ndarray, sign: np.ndarray, margin: float, absorb: bool):
     """Which steps reach a plate that is a sink for their line (any plate, if absorb), and where they end.
 
-    A step reaches the plate (a sheet, or a slab) if it enters it, or ends
-    within margin of it (then the line ends at the nearest point of the
-    plate's surface).
+    A step reaches the plate (a sheet, a slab, a disc or a tube: anything
+    with entry, distances and surface_points) if it enters it, or ends within
+    margin of it (then the line ends at the nearest point of its surface).
     """
-    a = plate.to_local(p)
-    b = plate.to_local(p_new)
-    half = plate.half
-    d = b - a
-    # where the step enters and leaves each band |u| <= a, |v| <= b, |w| <= t/2 (slab method)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        t1, t2 = (-half - a) / d, (half - a) / d
-    still = d == 0  # parallel to a band: inside it all along, or never
-    within = np.abs(a) <= half
-    t_in = np.where(still, np.where(within, -np.inf, np.inf), np.minimum(t1, t2)).max(axis=1)
-    t_out = np.where(still, np.where(within, np.inf, -np.inf), np.maximum(t1, t2)).min(axis=1)
     sink = np.ones(len(p), dtype=bool) if absorb else plate.sigma * sign < 0
-    outside = np.any(np.abs(a) > half, axis=1)
-    crossed = sink & outside & (t_in <= t_out) & (t_in >= 0) & (t_in <= 1)
-    near = sink & ~crossed & np.all(np.abs(b) <= half + margin, axis=1)
-    arrival_local = np.where(crossed[:, None], a + np.clip(t_in, 0, 1)[:, None] * d, b)
-    nearest = np.clip(arrival_local[near], -half, half)
-    inside = np.all(nearest == arrival_local[near], axis=1)  # within the slab: out through the nearest face
-    k = np.argmin(half - np.abs(nearest), axis=1)
-    rows = np.flatnonzero(inside)
-    nearest[rows, k[rows]] = np.where(nearest[rows, k[rows]] >= 0, 1.0, -1.0) * half[k[rows]]
-    arrival_local[near] = nearest
-    arrival = plate.from_local(arrival_local) + plate.center
+    t = plate.entry(p, p_new)
+    crossed = sink & ~np.isnan(t)
+    near = sink & ~crossed & (plate.distances(p_new) <= margin)
+    arrival = p_new.copy()
+    arrival[crossed] = p[crossed] + t[crossed, None] * (p_new[crossed] - p[crossed])
+    if near.any():
+        arrival[near] = plate.surface_points(p_new[near])
     return crossed | near, arrival
 
 

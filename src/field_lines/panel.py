@@ -7,9 +7,9 @@ from PySide6 import QtCore, QtWidgets
 
 from field_lines.conductors import Sphere
 from field_lines.presets import PRESETS
-from field_lines.scene import VIEW_HALF, Capacitor
+from field_lines.scene import SHAPES, VIEW_HALF, Capacitor
 from field_lines.sources import AXES, PointCharge
-from field_lines.strings import LANGUAGES, language, tr
+from field_lines.strings import LANGUAGES, STRINGS, language, tr
 from field_lines.units import CM, MM, NC, UC_PER_M2
 from field_lines.view import SIGMA_PALETTES, SIGMA_SCALES
 
@@ -68,6 +68,9 @@ class Panel(QtWidgets.QWidget):
         super().__init__(parent)
         self._texts: list[tuple[Callable[[str], None], str]] = []
         self._combo_keys: list[tuple[QtWidgets.QComboBox, list[str]]] = []
+        self._shaped_texts: list[tuple[QtWidgets.QLabel, str]] = []  # labels that follow the capacitor's shape
+        self._shape = "rect"  # the capacitor's, which some labels follow
+        self._planar = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self._space_group())
         layout.addWidget(self._model_group())
@@ -102,6 +105,16 @@ class Panel(QtWidgets.QWidget):
         label = QtWidgets.QLabel()
         self._text(label.setText, key)
         return label
+
+    def _shaped_label(self, key: str) -> QtWidgets.QLabel:
+        """A label that reads differently for the cylindrical capacitor (key + "_cylinder", if there is one)."""
+        label = QtWidgets.QLabel()
+        self._shaped_texts.append((label, key))
+        return label
+
+    def shaped_key(self, key: str) -> str:
+        cylinder = f"{key}_cylinder"
+        return cylinder if self._shape == "cylinder" and cylinder in STRINGS else key
 
     def _space_group(self):
         group, layout = self._group("group_space")
@@ -192,44 +205,71 @@ class Panel(QtWidgets.QWidget):
         layout.addWidget(self.capacitor_box)
         self.capacitor_form = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(self.capacitor_form)
+        self.capacitor_rows = form
         form.setContentsMargins(0, 0, 0, 0)
         defaults = Capacitor()
+        self.shape_combo = self._combo([f"shape_{shape}" for shape in SHAPES], SHAPES)
         self.width_box = spin_box(1, 20, 0.5, 1, defaults.width / CM)
         self.height_box = spin_box(1, 20, 0.5, 1, defaults.height / CM)
+        self.radius_box = spin_box(1, 9, 0.5, 1, defaults.radius / CM)
         self.separation_box = spin_box(0.2, 15, 0.1, 1, defaults.separation / CM)
+        self.inner_radius_box = spin_box(0.5, 8, 0.1, 1, defaults.inner_radius / CM)
+        self.outer_radius_box = spin_box(1, 9, 0.1, 1, defaults.outer_radius / CM)
+        self.length_box = spin_box(2, 20, 0.5, 1, defaults.length / CM)
+        self.cut_combo = self._combo(["cut_across", "cut_along"], ["across", "along"])
         self.thickness_box = spin_box(0.5, 10, 0.5, 1, defaults.thickness / MM)
         self.thickness_box.setSuffix(" mm")
         self.sigma_box = spin_box(-10, 10, 0.05, 2, defaults.sigma / UC_PER_M2)
         self.voltage_box = spin_box(-10000, 10000, 50, 0, defaults.voltage)
-        for box in (self.width_box, self.height_box, self.separation_box):
+        lengths = (self.width_box, self.height_box, self.radius_box, self.separation_box)
+        for box in (*lengths, self.inner_radius_box, self.outer_radius_box, self.length_box):
             box.setSuffix(" cm")
         self.sigma_box.setSuffix(" μC/m²")
         self.voltage_box.setSuffix(" V")
-        self.sigma_label, self.voltage_label = self._label("sigma"), self._label("voltage")
+        self.sigma_label, self.voltage_label = self._shaped_label("sigma"), self._label("voltage")
+        form.addRow(self._label("capacitor_shape"), self.shape_combo)
+        # the rows of each shape (the others are hidden)
+        self.shape_rows = {
+            "rect": [self.width_box, self.height_box, self.separation_box],
+            "disc": [self.radius_box, self.separation_box],
+            "cylinder": [self.inner_radius_box, self.outer_radius_box, self.length_box],
+        }
         for key, widget in (
             ("plate_width", self.width_box),
             ("plate_height", self.height_box),
+            ("plate_radius", self.radius_box),
             ("separation", self.separation_box),
+            ("inner_radius", self.inner_radius_box),
+            ("outer_radius", self.outer_radius_box),
+            ("tube_length", self.length_box),
+            ("cut_2d", self.cut_combo),
             ("plate_thickness", self.thickness_box),
         ):
             form.addRow(self._label(key), widget)
         form.addRow(self.sigma_label, self.sigma_box)
         form.addRow(self.voltage_label, self.voltage_box)
+        # the outer tube stays outside the inner one
+        self.inner_radius_box.valueChanged.connect(lambda value: self.outer_radius_box.setMinimum(value + 0.2))
+        self.outer_radius_box.setMinimum(defaults.inner_radius / CM + 0.2)
         for box in (
-            self.width_box,
-            self.height_box,
-            self.separation_box,
+            *lengths,
+            self.inner_radius_box,
+            self.outer_radius_box,
+            self.length_box,
             self.thickness_box,
             self.sigma_box,
             self.voltage_box,
         ):
             box.valueChanged.connect(_emit(self.capacitor_changed))
+        self.cut_combo.currentIndexChanged.connect(_emit(self.capacitor_changed))
+        self.shape_combo.currentIndexChanged.connect(self._shape_chosen)
         self.readouts: dict[str, QtWidgets.QLabel] = {}
         for key in ("readout_E_center", "readout_E_ideal", "readout_dV", "readout_Q", "readout_C", "readout_C_ideal"):
             value = QtWidgets.QLabel("—")
             value.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
             self.readouts[key] = value
-            form.addRow(self._label(key), value)
+            form.addRow(self._shaped_label(key), value)
+        self._show_shape_rows()
         layout.addWidget(self.capacitor_form)
         self.capacitor_form.hide()
         self.set_kind("charges")
@@ -343,6 +383,18 @@ class Panel(QtWidgets.QWidget):
         self.capacitor_form.setVisible(checked)
         self.capacitor_changed.emit()
 
+    def _shape_chosen(self) -> None:
+        self._show_shape_rows()
+        self.capacitor_changed.emit()
+
+    def _show_shape_rows(self) -> None:
+        """The capacitor's rows for its shape (the cut only for a cylinder in 2D), and its labels."""
+        self._shape = self.shape_combo.currentData()
+        for widget in {w for rows in self.shape_rows.values() for w in rows}:
+            self.capacitor_rows.setRowVisible(widget, widget in self.shape_rows[self._shape])
+        self.capacitor_rows.setRowVisible(self.cut_combo, self._shape == "cylinder" and self._planar)
+        self.retranslate()
+
     def set_kind(self, kind: str) -> None:
         """Show the controls of the model: point charges and σ, or spheres and ΔV."""
         conductors = kind == "conductors"
@@ -364,6 +416,8 @@ class Panel(QtWidgets.QWidget):
     def retranslate(self) -> None:
         for setter, key in self._texts:
             setter(tr(key))
+        for label, key in self._shaped_texts:
+            label.setText(tr(self.shaped_key(key)))
         for combo, keys in self._combo_keys:
             for index, key in enumerate(keys):
                 combo.setItemText(index, tr(key))
@@ -373,6 +427,8 @@ class Panel(QtWidgets.QWidget):
             self.sphere_table.cellWidget(row, 6).setToolTip(tr("remove"))
 
     def set_planar(self, planar: bool) -> None:
+        self._planar = planar
+        self._show_shape_rows()
         with QtCore.QSignalBlocker(self.radio_2d), QtCore.QSignalBlocker(self.radio_3d):
             (self.radio_2d if planar else self.radio_3d).setChecked(True)
         self.table.setColumnHidden(3, planar)
@@ -476,19 +532,41 @@ class Panel(QtWidgets.QWidget):
         self.charge_edited.emit(row, *values)
 
     def set_capacitor(self, capacitor: Capacitor | None) -> None:
-        boxes = (self.capacitor_box, self.width_box, self.height_box, self.separation_box, self.thickness_box)
-        blockers = [QtCore.QSignalBlocker(w) for w in (*boxes, self.sigma_box, self.voltage_box)]
+        widgets = (
+            self.capacitor_box,
+            self.shape_combo,
+            self.width_box,
+            self.height_box,
+            self.radius_box,
+            self.separation_box,
+            self.inner_radius_box,
+            self.outer_radius_box,
+            self.length_box,
+            self.cut_combo,
+            self.thickness_box,
+            self.sigma_box,
+            self.voltage_box,
+        )
+        blockers = [QtCore.QSignalBlocker(w) for w in widgets]
         self.capacitor_box.setChecked(capacitor is not None)
         self.capacitor_form.setVisible(capacitor is not None)
         if capacitor is not None:
+            self.shape_combo.setCurrentIndex(self.shape_combo.findData(capacitor.shape))
             self.width_box.setValue(capacitor.width / CM)
             self.height_box.setValue(capacitor.height / CM)
+            self.radius_box.setValue(capacitor.radius / CM)
             self.separation_box.setValue(capacitor.separation / CM)
+            self.inner_radius_box.setValue(capacitor.inner_radius / CM)
+            self.outer_radius_box.setMinimum(capacitor.inner_radius / CM + 0.2)
+            self.outer_radius_box.setValue(capacitor.outer_radius / CM)
+            self.length_box.setValue(capacitor.length / CM)
+            self.cut_combo.setCurrentIndex(self.cut_combo.findData(capacitor.cut))
             self.thickness_box.setValue(capacitor.thickness / MM)
             self.sigma_box.setValue(capacitor.sigma / UC_PER_M2)
             self.voltage_box.setValue(capacitor.voltage)
         for blocker in blockers:
             blocker.unblock()
+        self._show_shape_rows()
 
     def capacitor(self, normal: str) -> Capacitor | None:
         """The capacitor as the panel shows it, or None if it is switched off."""
@@ -502,6 +580,12 @@ class Panel(QtWidgets.QWidget):
             sigma=self.sigma_box.value() * UC_PER_M2,
             voltage=self.voltage_box.value(),
             normal=normal,
+            shape=self.shape_combo.currentData(),
+            radius=self.radius_box.value() * CM,
+            inner_radius=self.inner_radius_box.value() * CM,
+            outer_radius=self.outer_radius_box.value() * CM,
+            length=self.length_box.value() * CM,
+            cut=self.cut_combo.currentData(),
         )
 
     def set_readouts(self, values: dict[str, str]) -> None:

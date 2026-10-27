@@ -36,7 +36,7 @@ def test_lines_appear_and_grow(plotter):
 def test_plates_are_drawn_red_and_blue(plotter):
     view = SceneView(plotter)
     view.set_planar(True)
-    view.set_plates(Capacitor(normal="x").slabs())
+    view.set_plates(Capacitor(normal="x").bodies())
     plotter.render()
     image = plotter.screenshot(return_img=True).astype(int)
     h, w = image.shape[:2]
@@ -175,3 +175,28 @@ def test_sigma_colour_bar_labels_are_readable():
     assert SigmaColours("contrast", "viridis", (-0.91, 0.91)).label_format == "%.2f"  # 0 prints as 0.00
     assert SigmaColours("contrast", "viridis", (0.4462, 0.4483)).label_format == "%.5f"  # tiny ranges keep digits
     assert SigmaColours("log", "viridis", (0.03, 2.3)).label_format == "%.2g"
+
+
+@pytest.mark.parametrize("shape", ["disc", "cylinder"])
+def test_discs_and_tubes_are_closed_and_cut(shape):
+    from field_lines.scene import capacitor_axis, uniform_density
+    from field_lines.view import ring_section, ring_surfaces
+
+    cap = Capacitor(shape=shape)
+    for body in cap.bodies():
+        faces = ring_surfaces(uniform_density(body))
+        surface = pv.merge(faces).extract_surface(algorithm="dataset_surface").clean(tolerance=1e-9)
+        assert surface.n_open_edges == 0  # a closed body
+    cap.normal = capacitor_axis(cap, planar=True)
+    pieces = [len(ring_section(uniform_density(body))) for body in cap.bodies()]
+    if shape == "disc":
+        assert pieces == [4, 4]  # each disc's cut: two halves and two ends
+    else:
+        assert pieces == [2, 2]  # each tube cut across: an inner and an outer ring
+        cap.cut = "along"
+        cap.normal = capacitor_axis(cap, planar=True)
+        sections = [ring_section(uniform_density(body)) for body in cap.bodies()]
+        assert [len(s) for s in sections] == [8, 8]  # on each side of the axis: two halves and two ends
+        for section in sections:
+            for piece in section:
+                assert np.allclose(piece.points[:, 2], 0.0003)  # just above the plane

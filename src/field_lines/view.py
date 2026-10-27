@@ -8,8 +8,8 @@ import pyvista as pv
 from matplotlib import colormaps
 from matplotlib.colors import ListedColormap
 
-from field_lines.scene import VIEW_HALF, PlateDensity
-from field_lines.sources import AXES, Plate
+from field_lines.scene import VIEW_HALF, PlateDensity, RingDensity, uniform_density
+from field_lines.sources import AXES, Plate, Ring
 from field_lines.strings import LANGUAGES, STRINGS, tr
 from field_lines.tracing import FieldLine
 from field_lines.units import UC_PER_M2
@@ -248,6 +248,115 @@ def slab_section(density: PlateDensity) -> list[pv.StructuredGrid]:
     return pieces
 
 
+def ring_surfaces(density: RingDensity) -> list[pv.StructuredGrid]:
+    """3D: a disc's or a tube's faces, each coloured by its own σ."""
+    ring = density.ring
+    meshes = []
+    for name, (along, sigma) in density.faces.items():
+        ss, pp = np.meshgrid(along, density.phi, indexing="ij")
+        if name in ("w+", "w-"):
+            w = np.full(ss.shape, ring.half_length if name == "w+" else -ring.half_length)
+            local = np.stack((ss * np.cos(pp), ss * np.sin(pp), w), axis=-1)
+        else:
+            radius = ring.r_out if name == "out" else ring.r_in
+            local = np.stack((radius * np.cos(pp), radius * np.sin(pp), ss), axis=-1)
+        meshes.append(_sheet(ring, local, sigma))
+    return meshes
+
+
+def ring_section(density: RingDensity) -> list[pv.StructuredGrid]:
+    """2D: a disc's or a tube's cut by the z = 0 plane.
+
+    With its axis along z the cut is an annulus: its inner half coloured by
+    the inner cylinder's σ, its outer half by the outer one's (a rod is grey
+    inside, with its rim coloured). With its axis in the plane the cut goes
+    through the axis: a rectangle on each side of it, joined into one across
+    a disc; each is coloured like a slab's cut, its halves by its two long
+    faces and its ends by the short ones. A mesh without σ is drawn grey.
+    """
+    ring = density.ring
+    h, r_in, r_out = ring.half_length, ring.r_in, ring.r_out
+    z_axis = ring.local_axes.index(2)
+    phi = density.phi[:-1]
+
+    def column(name: str, angle: float) -> np.ndarray:
+        """σ along a face, at the grid angle nearest to angle."""
+        j = int(np.argmin(np.abs(np.angle(np.exp(1j * (phi - angle))))))
+        return density.faces[name][1][:, j]
+
+    def piece(local: np.ndarray, sigma: np.ndarray | None) -> pv.StructuredGrid:
+        mesh = _sheet(ring, local, np.zeros(local.shape[:2]) if sigma is None else sigma)
+        if sigma is None:
+            mesh.point_data.clear()
+        mesh.points[:, 2] += PLANE_BELOW  # above the lines and the equipotentials, which the body hides
+        return mesh
+
+    if z_axis == 2:
+        cut = -ring.center[2]
+        if h == 0 or abs(cut) > h:
+            return []
+
+        def annulus(r0: float, r1: float, name: str | None) -> pv.StructuredGrid:
+            rr, pp = np.meshgrid([r0, r1], density.phi, indexing="ij")
+            local = np.stack((rr * np.cos(pp), rr * np.sin(pp), np.full(rr.shape, cut)), axis=-1)
+            if name is None:
+                return piece(local, None)
+            along, sigma = density.faces[name]
+            at_cut = np.array([np.interp(cut, along, sigma[:, j]) for j in range(sigma.shape[1])])
+            return piece(local, np.repeat(at_cut[None], 2, axis=0))
+
+        if r_in > 0:
+            mid = (r_in + r_out) / 2
+            return [annulus(r_in, mid, "in"), annulus(mid, r_out, "out")]
+        strip = min(FACE_STRIP, r_out / 4)
+        return [annulus(0.0, r_out - strip, None), annulus(r_out - strip, r_out, "out")]
+    if ring.center[2] != 0:
+        return []
+    first = 0.0 if z_axis == 1 else np.pi / 2  # the half of the plane through the axis on one side
+    radial = np.array([np.cos(first), np.sin(first), 0.0])
+
+    def rectangle(s: np.ndarray, w: np.ndarray, sigma: np.ndarray) -> pv.StructuredGrid:
+        """s: signed distance from the axis in the plane, w: along the axis, sigma (len(s), len(w))."""
+        ss, ww = np.meshgrid(s, w, indexing="ij")
+        return piece(ss[..., None] * radial + ww[..., None] * np.array([0.0, 0.0, 1.0]), sigma)
+
+    pieces = []
+    if 2 * h >= r_out - r_in:  # a tube or a rod: long along its axis
+        end = h - min(FACE_STRIP, h / 4)
+        for side, angle in ((1, first), (-1, first + np.pi)):
+            mid = (r_in + r_out) / 2
+            halves = ((r_in, mid, "in"), (mid, r_out, "out")) if r_in > 0 else ((0.0, r_out, "out"),)
+            for r0, r1, name in halves:
+                along = density.faces[name][0]
+                w = np.concatenate(([-end], along[np.abs(along) < end], [end]))
+                sigma = np.interp(w, along, column(name, angle))
+                pieces.append(rectangle(side * np.array([r0, r1]), w, np.repeat(sigma[None], 2, axis=0)))
+            for w_side, name in ((1, "w+"), (-1, "w-")):
+                value = column(name, angle).mean()
+                cap = rectangle(side * np.array([r_in, r_out]), w_side * np.array([end, h]), np.full((2, 2), value))
+                pieces.append(cap)
+    else:  # a disc: long across its axis
+        end = r_out - min(FACE_STRIP, r_out / 4)
+        for w_side, name in ((1, "w+"), (-1, "w-")):
+            along = density.faces[name][0]
+            inside = np.concatenate((along[along < end], [end]))
+            near, far = (np.interp(inside, along, column(name, angle)) for angle in (first, first + np.pi))
+            sigma = np.concatenate((far[::-1], near))
+            s = np.concatenate((-inside[::-1], inside))
+            pieces.append(rectangle(s, w_side * np.array([0.0, h]), np.repeat(sigma[:, None], 2, axis=1)))
+        for side, angle in ((1, first), (-1, first + np.pi)):
+            value = column("out", angle).mean()
+            pieces.append(rectangle(side * np.array([end, r_out]), np.array([-h, h]), np.full((2, 2), value)))
+    return pieces
+
+
+def body_meshes(density: PlateDensity | RingDensity, planar: bool) -> list[pv.StructuredGrid]:
+    """A plate's surface coloured by σ: in 3D all its faces, in 2D its cut by the plane."""
+    if isinstance(density, RingDensity):
+        return ring_section(density) if planar else ring_surfaces(density)
+    return slab_section(density) if planar else slab_faces(density)
+
+
 def sphere_ring(points: np.ndarray, quads: np.ndarray, sigma: np.ndarray, samples: int = 144) -> pv.StructuredGrid:
     """2D: the sphere's rim where it crosses its centre's z plane, a ring just inside it coloured by σ there."""
     center = points.mean(axis=0)
@@ -409,7 +518,7 @@ class SceneView:
             for language in LANGUAGES:
                 if STRINGS[key][language] in self.pl.scalar_bars:
                     self.pl.remove_scalar_bar(STRINGS[key][language], render=False)
-        values = [np.concatenate([a.ravel() for a in (d.inner, d.outer, d.rim_u, d.rim_v)]) for d in densities or []]
+        values = [d.values() for d in densities or []]
         values += [sigma for _, _, sigma in spheres or [] if sigma is not None]
         colours = sigma_colours(np.concatenate(values) / UC_PER_M2 if values else np.zeros(0), scale, palette)
         if densities:
@@ -421,14 +530,19 @@ class SceneView:
         if densities:
             return
         for plate in plates:
-            half = np.maximum(plate.half, [0.0, 0.0, SHEET_THICKNESS / 2])
-            lo = plate.from_local(-half[None])[0] + plate.center
-            hi = plate.from_local(half[None])[0] + plate.center
-            bounds = np.column_stack((lo, hi)).ravel()
-            actor = self.pl.add_mesh(
-                pv.Box(bounds), color=sign_color(plate.sigma), opacity=0.6, pickable=False, reset_camera=False
-            )
-            self.plate_actors.append(actor)
+            if isinstance(plate, Ring):
+                meshes = body_meshes(uniform_density(plate), planar)
+                for mesh in meshes:
+                    mesh.point_data.clear()
+            else:
+                half = np.maximum(plate.half, [0.0, 0.0, SHEET_THICKNESS / 2])
+                lo = plate.from_local(-half[None])[0] + plate.center
+                hi = plate.from_local(half[None])[0] + plate.center
+                meshes = [pv.Box(np.column_stack((lo, hi)).ravel())]
+            for mesh in meshes:
+                style = dict(opacity=0.6, lighting=not planar, pickable=False, reset_camera=False)
+                actor = self.pl.add_mesh(mesh, color=sign_color(plate.sigma), **style)
+                self.plate_actors.append(actor)
 
     def _sigma_mesh(self, mesh, colours: SigmaColours, planar: bool, **style):
         scalars = "sigma"
@@ -448,10 +562,16 @@ class SceneView:
             **style,
         )
 
-    def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool, colours: SigmaColours) -> None:
+    def _coloured_plates(self, densities: Sequence, planar: bool, colours: SigmaColours) -> None:
         for density in densities:
-            for mesh in slab_section(density) if planar else slab_faces(density):
-                self.plate_actors.append(self._sigma_mesh(mesh, colours, planar))
+            round_faces = isinstance(density, RingDensity) and not planar
+            for mesh in body_meshes(density, planar):
+                if "sigma" in mesh.point_data:
+                    actor = self._sigma_mesh(mesh, colours, planar, smooth_shading=round_faces)
+                else:  # a solid rod's inside, cut across
+                    style = dict(lighting=False, pickable=False, reset_camera=False)
+                    actor = self.pl.add_mesh(mesh, color=SPHERE_INSIDE, **style)
+                self.plate_actors.append(actor)
 
     def _coloured_sphere(self, points, quads, sigma: np.ndarray | None, planar: bool, colours: SigmaColours):
         """A metallic sphere coloured by σ, or plain grey while σ is not known yet."""
@@ -487,7 +607,7 @@ class SceneView:
         """2D: look down the z axis with a parallel camera that pans instead of rotating."""
         if planar:
             self.pl.enable_parallel_projection()
-            self.pl.view_xy()
+            self.pl.view_xy(bounds=(-VIEW_HALF, VIEW_HALF) * 3)  # not on everything drawn: lines reach far
             self.pl.camera.parallel_scale = 1.08 * VIEW_HALF
             self.pl.enable_custom_trackball_style(
                 left="pan", shift_left="pan", control_left="pan", middle="pan", right="dolly"

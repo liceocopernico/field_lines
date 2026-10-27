@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from field_lines import presets
 from field_lines.scene import Capacitor, Scene
@@ -105,3 +106,49 @@ def test_plate_densities_of_the_sigma_model_are_uniform():
     assert minus.at(0.0, 0.0) == (-scene.capacitor.sigma, -scene.capacitor.sigma)
     presets.load(scene, "dipole")
     assert scene.plate_densities() is None
+
+
+def test_capacitor_shapes():
+    import math
+
+    from field_lines.scene import capacitor_axis
+    from field_lines.sources import Ring
+
+    disc = Capacitor(shape="disc", radius=5 * CM, separation=3 * CM, thickness=0.002)
+    assert disc.area == math.pi * (5 * CM) ** 2
+    plus, minus = disc.bodies()
+    assert isinstance(plus, Ring) and plus.r_in == 0 and plus.half_length == 0.001
+    assert plus.center[2] == 1.5 * CM + 0.001 and plus.gap == "w-" and minus.gap == "w+"
+    assert plus.charge == -minus.charge == disc.sigma * disc.area
+    cylinder = Capacitor(shape="cylinder", inner_radius=2 * CM, outer_radius=4 * CM, length=10 * CM, thickness=0.002)
+    inner, outer = cylinder.bodies()
+    np.testing.assert_allclose([inner.r_in, inner.r_out, outer.r_in, outer.r_out], [0.018, 0.02, 0.04, 0.042])
+    assert inner.charge == pytest.approx(-outer.charge)  # equal and opposite: σ a = -σ' b
+    rod, _ = Capacitor(shape="cylinder", inner_radius=0.6 * CM, thickness=0.008).bodies()
+    assert rod.r_in == 0.0  # thicker than its radius: a rod
+    center, a, b = cylinder.probes()
+    assert np.linalg.norm(center) == pytest.approx(3 * CM) and np.linalg.norm(b) == pytest.approx(4 * CM)
+    E_ideal, C_ideal = cylinder.ideal(1e-9)
+    assert C_ideal == pytest.approx(2 * math.pi * 8.8541878128e-12 * 0.1 / math.log(2), rel=1e-6)
+    # in 2D the plates cross the plane; a cylinder is cut across its axis or along it
+    assert capacitor_axis(Capacitor(shape="disc"), planar=True) == "x"
+    assert capacitor_axis(Capacitor(shape="cylinder"), planar=True) == "z"
+    assert capacitor_axis(Capacitor(shape="cylinder", cut="along"), planar=True) == "x"
+    assert capacitor_axis(Capacitor(shape="cylinder", normal="x"), planar=False) == "x"
+
+
+def test_cylinder_in_the_charges_model():
+    scene = Scene()
+    presets.load(scene, "cylindrical_capacitor")
+    assert scene.kind == "charges" and scene.capacitor.shape == "cylinder"
+    readouts = scene.capacitor_readouts()
+    cap = scene.capacitor
+    # halfway across the gap, in the middle of the tubes' length: nearly the field of infinite tubes
+    assert readouts["E_center"] == pytest.approx(readouts["E_ideal"], rel=0.06)
+    assert readouts["C"] == pytest.approx(readouts["C_ideal"], rel=0.06)
+    assert readouts["Q"] == pytest.approx(cap.sigma * cap.area)
+    scene.set_planar(True)
+    assert scene.capacitor.normal == "z"  # cut across: two rings
+    lines = scene.lines()
+    assert lines and all(line.end == "plate" for line in lines)
+    assert all(np.abs(line.points[:, 2]).max() == 0.0 for line in lines)

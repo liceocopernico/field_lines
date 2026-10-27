@@ -3,8 +3,11 @@
 Two models:
 - "charges": point charges and a capacitor whose plates carry a uniform σ
   (the field is the sum of theirs);
-- "conductors": metallic spheres and a capacitor whose plates are held at
-  fixed potentials (conductors.ConductorSolution finds their charges).
+- "conductors": metallic spheres and a capacitor whose plates are held at a
+  fixed potential difference, with equal and opposite charges
+  (conductors.ConductorSolution finds the charges).
+
+The capacitor has rectangular or circular plates, or is cylindrical.
 """
 
 import copy
@@ -15,7 +18,7 @@ import numpy as np
 
 from field_lines import conductors, seeding
 from field_lines.conductors import ConductorSolution, Sphere
-from field_lines.sources import AXES, FieldModel, Plate, PointCharge, Superposition
+from field_lines.sources import AXES, FieldModel, Plate, PointCharge, Ring, Superposition
 from field_lines.tracing import FieldLine, trace
 from field_lines.units import CM, EPS0, MM, NC, UC_PER_M2
 
@@ -38,39 +41,132 @@ def charge_radius(q: float) -> float:
     return 0.4 * CM + 0.15 * CM * math.sqrt(abs(q) / NC)
 
 
+SHAPES = ("rect", "disc", "cylinder")
+
+
 @dataclass
 class Capacitor:
+    """Two plates, rectangular or circular, or two coaxial tubes, each with a thickness.
+
+    Parallel plates are separation apart (between their inner faces) and grow
+    outwards with the thickness. The cylinder's inner tube has its outer face
+    at inner_radius and grows inwards (into a rod, if it is thicker than
+    that); the outer tube has its inner face at outer_radius and grows
+    outwards. The positive plate is on the + side of the axis, or inside.
+    """
+
     width: float = 10 * CM
     height: float = 10 * CM
     separation: float = 3 * CM
-    sigma: float = 0.2 * UC_PER_M2  # charges model: charge density of the positive plate
-    voltage: float = 500.0  # conductors model: the plates are at +voltage/2 and -voltage/2
-    normal: str = "z"  # the capacitor's axis; the positive plate is on its + side
-    thickness: float = 2 * MM  # of each plate; separation is the gap between the plates' inner faces
+    sigma: float = 0.2 * UC_PER_M2  # charges model: charge density of the positive plate (towards the other)
+    voltage: float = 500.0  # conductors model: the potential difference between the plates
+    normal: str = "z"  # the capacitor's axis
+    thickness: float = 2 * MM  # of each plate
+    shape: str = "rect"  # one of SHAPES: rectangular plates, circular plates, coaxial tubes
+    radius: float = 5 * CM  # of the circular plates
+    inner_radius: float = 2 * CM  # of the cylinder's inner tube (its outer face)
+    outer_radius: float = 4 * CM  # of the outer tube (its inner face)
+    length: float = 10 * CM  # of the tubes
+    cut: str = "across"  # in 2D the cylinder is cut "across" its axis (two rings) or "along" it
 
     @property
     def area(self) -> float:
+        """The area of the positive plate's face towards the other plate (its σ = Q / area)."""
+        if self.shape == "disc":
+            return math.pi * self.radius**2
+        if self.shape == "cylinder":
+            return 2 * math.pi * self.inner_radius * self.length
         return self.width * self.height
 
-    def plates(self, sigma: float | None = None) -> list[Plate]:
-        """The plates as charged sheets at their inner faces, with density ±sigma (default: self.sigma)."""
-        sigma = self.sigma if sigma is None else sigma
+    def _offset(self, distance: float) -> np.ndarray:
         offset = np.zeros(3)
-        offset[AXES.index(self.normal)] = self.separation / 2
+        offset[AXES.index(self.normal)] = distance
+        return offset
+
+    def plates(self, sigma: float | None = None) -> list:
+        """The plates as charged sheets at their inner faces; the positive one with density sigma.
+
+        (default: self.sigma). The negative one has the opposite charge: on
+        the outer tube, a lower σ over its larger face.
+        """
+        sigma = self.sigma if sigma is None else sigma
+        if self.shape == "cylinder":
+            a, b, h = self.inner_radius, self.outer_radius, self.length / 2
+            return [
+                Ring(sigma, np.zeros(3), a, a, h, self.normal, gap="out"),
+                Ring(-sigma * a / b, np.zeros(3), b, b, h, self.normal, gap="in"),
+            ]
+        offset = self._offset(self.separation / 2)
+        if self.shape == "disc":
+            return [
+                Ring(sigma, offset, 0.0, self.radius, 0.0, self.normal, gap="w-"),
+                Ring(-sigma, -offset, 0.0, self.radius, 0.0, self.normal, gap="w+"),
+            ]
         return [
             Plate(sigma, offset, self.width, self.height, self.normal),
             Plate(-sigma, -offset, self.width, self.height, self.normal),
         ]
 
-    def slabs(self, sigma: float | None = None) -> list[Plate]:
-        """The plates as slabs: inner faces at ±separation/2, outer faces a thickness farther out."""
+    def bodies(self, sigma: float | None = None) -> list:
+        """The plates as bodies with their thickness (slabs, discs or tubes), with the sheets' σ."""
         sigma = self.sigma if sigma is None else sigma
-        offset = np.zeros(3)
-        offset[AXES.index(self.normal)] = self.separation / 2 + self.thickness / 2
+        t = self.thickness
+        if self.shape == "cylinder":
+            a, b, h = self.inner_radius, self.outer_radius, self.length / 2
+            return [
+                Ring(sigma, np.zeros(3), max(a - t, 0.0), a, h, self.normal, gap="out"),
+                Ring(-sigma * a / b, np.zeros(3), b, b + t, h, self.normal, gap="in"),
+            ]
+        offset = self._offset(self.separation / 2 + t / 2)
+        if self.shape == "disc":
+            return [
+                Ring(sigma, offset, 0.0, self.radius, t / 2, self.normal, gap="w-"),
+                Ring(-sigma, -offset, 0.0, self.radius, t / 2, self.normal, gap="w+"),
+            ]
         return [
-            Plate(sigma, offset, self.width, self.height, self.normal, self.thickness),
-            Plate(-sigma, -offset, self.width, self.height, self.normal, self.thickness),
+            Plate(sigma, offset, self.width, self.height, self.normal, t),
+            Plate(-sigma, -offset, self.width, self.height, self.normal, t),
         ]
+
+    def ideal_sigma(self) -> float:
+        """σ of the positive plate of the ideal capacitor (no edges) at self.voltage."""
+        if self.shape == "cylinder":
+            a, b = self.inner_radius, self.outer_radius
+            return EPS0 * self.voltage / (a * math.log(b / a))
+        return EPS0 * self.voltage / self.separation
+
+    def probes(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Where the readouts look: E at the centre of the gap, ΔV between these two points on the plates.
+
+        Parallel plates: the centre, and the centres of the inner faces. The
+        cylinder: halfway across the gap, and the two faces across it, in the
+        middle of its length.
+        """
+        if self.shape == "cylinder":
+            across = self.bodies(0.0)[0].from_local(np.array([[1.0, 0.0, 0.0]]))[0]  # a direction across the axis
+            a, b = self.inner_radius, self.outer_radius
+            return (a + b) / 2 * across, a * across, b * across
+        offset = self._offset(self.separation / 2)
+        return np.zeros(3), offset, -offset
+
+    def ideal(self, charge: float) -> tuple[float, float]:
+        """E at the probe and C of the ideal capacitor (no edges) with this charge."""
+        if self.shape == "cylinder":
+            a, b, L = self.inner_radius, self.outer_radius, self.length
+            return abs(charge) / (2 * math.pi * EPS0 * L * (a + b) / 2), 2 * math.pi * EPS0 * L / math.log(b / a)
+        return abs(charge) / (self.area * EPS0), EPS0 * self.area / self.separation
+
+
+def capacitor_axis(capacitor: Capacitor, planar: bool) -> str:
+    """The capacitor's axis: in 3D as it is; in 2D in the plane, so that the plane cuts the plates.
+
+    A cylinder cut across its axis has its axis along z instead.
+    """
+    if not planar:
+        return capacitor.normal
+    if capacitor.shape == "cylinder" and capacitor.cut == "across":
+        return "z"
+    return "x" if capacitor.normal == "z" else capacitor.normal
 
 
 @dataclass
@@ -90,6 +186,54 @@ class PlateDensity:
         i = int(np.argmin(np.abs(self.u - u)))
         j = int(np.argmin(np.abs(self.v - v)))
         return float(self.inner[i, j]), float(self.outer[i, j])
+
+    def values(self) -> np.ndarray:
+        return np.concatenate([a.ravel() for a in (self.inner, self.outer, self.rim_u, self.rim_v)])
+
+
+def ring_face_names(ring: Ring) -> list[str]:
+    """A solid ring's faces: the flat ones at w = ±half_length, the outer cylinder and a tube's inner one."""
+    names = ["w+", "w-"] if ring.r_out > ring.r_in else []
+    if ring.half_length > 0:
+        names += ["out"] + (["in"] if ring.r_in > 0 else [])
+    return names
+
+
+@dataclass
+class RingDensity:
+    """Surface charge density over a disc's or a tube's faces, on grids along and around each face.
+
+    faces: for each face (see ring_face_names), the positions along it (ρ on
+    a flat face, w on a cylinder) and σ there, (len(along), len(phi)) in C/m².
+    phi is closed: its last angle is the first one plus 2π.
+    """
+
+    ring: Ring
+    phi: np.ndarray
+    faces: dict[str, tuple[np.ndarray, np.ndarray]]
+
+    def values(self) -> np.ndarray:
+        return np.concatenate([sigma.ravel() for _, sigma in self.faces.values()])
+
+
+def ring_angles() -> np.ndarray:
+    """The angles around a ring where its σ is known (its panels' centres), closed."""
+    phi = (np.arange(conductors.RING_SEGMENTS) + 0.5) * 2 * np.pi / conductors.RING_SEGMENTS
+    return np.append(phi, phi[0] + 2 * np.pi)
+
+
+def uniform_density(body) -> "PlateDensity | RingDensity":
+    """A plate's or a ring's density, the same σ (its own) on every face."""
+    if isinstance(body, Ring):
+        phi = ring_angles()
+        faces = {}
+        for name in ring_face_names(body):
+            along = [body.r_in, body.r_out] if name in ("w+", "w-") else [-body.half_length, body.half_length]
+            faces[name] = (np.array(along), np.full((2, len(phi)), body.sigma))
+        return RingDensity(body, phi, faces)
+    a, b = body.width / 2, body.height / 2
+    same = np.full((2, 2), body.sigma)
+    return PlateDensity(body, np.array([-a, a]), np.array([-b, b]), same, same.copy(), same.copy(), same.copy())
 
 
 class Scene:
@@ -115,73 +259,94 @@ class Scene:
         """The metallic spheres that act: only in the conductors model."""
         return self.spheres if self.uses_conductor else []
 
-    def conductor_plates(self) -> list[Plate]:
-        """The capacitor's plates as conductors: slabs (their σ means nothing: the solution has the charges)."""
-        return self.capacitor.slabs(0.0) if self.capacitor is not None else []
+    def conductor_plates(self) -> list:
+        """The capacitor's plates as conductors, with their thickness (their σ means nothing: the solution
+        has the charges)."""
+        return self.capacitor.bodies(0.0) if self.capacitor is not None else []
 
     def voltages(self) -> list[float]:
         """The conductors' potentials, plates first, then spheres."""
         plates = [self.capacitor.voltage / 2, -self.capacitor.voltage / 2] if self.capacitor is not None else []
         return plates + [sphere.voltage for sphere in self.spheres]
 
+    def solve(self, solver: conductors.Solver) -> ConductorSolution:
+        """The charges at the scene's potentials; the capacitor's plates get equal and opposite charges."""
+        return solver.solve(self.voltages(), neutral=[0, 1] if self.capacitor is not None else [])
+
     def geometry_key(self) -> tuple:
         return conductors.geometry_key(self.conductor_plates(), self.spheres)
 
-    def plates(self) -> list[Plate]:
-        """The capacitor's plates, each with its σ (in the conductors model, its mean σ = Q/A)."""
+    def plates(self) -> list:
+        """The capacitor's plates, each with its σ.
+
+        In the charges model the charged sheets; in the conductors model the
+        bodies, with their mean σ = Q/A over the face towards the other plate.
+        """
         if self.capacitor is None:
             return []
         if not self.uses_conductor:
             return self.capacitor.plates()
-        plates = self.conductor_plates()
-        for k, plate in enumerate(plates):
-            if self.conductor is not None:
-                plate.sigma = self.conductor.charge(k) / self.capacitor.area
-            else:  # still being computed: the ideal capacitor's density
-                plate.sigma = (1 - 2 * k) * EPS0 * self.capacitor.voltage / self.capacitor.separation
-        return plates
+        if self.conductor is None:  # still being computed: the ideal capacitor's densities
+            return self.capacitor.bodies(self.capacitor.ideal_sigma())
+        bodies = self.conductor_plates()
+        for k, body in enumerate(bodies):
+            body.sigma = self.conductor.charge(k) / body.area
+        return bodies
 
-    def drawn_plates(self) -> list[Plate]:
-        """The plates as they are drawn: slabs of the capacitor's thickness, with their σ for the colour.
+    def drawn_plates(self) -> list:
+        """The plates as they are drawn: bodies of the capacitor's thickness, with their σ for the colour.
 
-        In the charges model the charged sheet is the slab's inner face.
+        In the charges model the charged sheet is the body's face towards the other plate.
         """
         if self.capacitor is None:
             return []
-        slabs = self.capacitor.slabs()
-        for slab, plate in zip(slabs, self.plates()):
-            slab.sigma = plate.sigma
-        return slabs
+        bodies = self.capacitor.bodies()
+        for body, plate in zip(bodies, self.plates()):
+            body.sigma = plate.sigma
+        return bodies
 
-    def plate_densities(self) -> list[PlateDensity] | None:
-        """σ over both plates: uniform in the σ model, from the solution in the conductor model.
+    def plate_densities(self) -> list | None:
+        """σ over both plates (PlateDensity or RingDensity): uniform in the σ model, solved in the other.
 
-        A uniformly charged sheet has no faces: both get the sheet's σ. A
+        A uniformly charged sheet has no faces: all get the sheet's σ. A
         conductor carries its charge on its surface, each face with ε₀ times
         the field just outside it. None while the conductor model is computed.
         """
         if self.capacitor is None or (self.uses_conductor and self.conductor is None):
             return None
         densities = []
-        for k, slab in enumerate(self.drawn_plates()):
-            a, b = slab.width / 2, slab.height / 2
+        for k, body in enumerate(self.drawn_plates()):
             if not self.uses_conductor:
-                same = np.full((2, 2), slab.sigma)
-                edges = np.array([-a, a]), np.array([-b, b])
-                densities.append(PlateDensity(slab, *edges, same, same.copy(), same.copy(), same.copy()))
-                continue
-            u, v = conductors.plate_face_grid(slab)
-            # the panels' centres, and the plate's edges with the outermost panels' σ
-            u, v = np.concatenate(([-a], u, [a])), np.concatenate(([-b], v, [b]))
-            inner, outer = (np.pad(face, 1, mode="edge") for face in self.conductor.faces[k])
-
-            def rim(name: str) -> np.ndarray:  # σ along a rim, averaged across the thickness
-                return np.pad(self.conductor.face(k, name).mean(axis=1), 1, mode="edge")
-
-            rim_u = np.array([rim("u-"), rim("u+")])
-            rim_v = np.array([rim("v-"), rim("v+")])
-            densities.append(PlateDensity(slab, u, v, inner, outer, rim_u, rim_v))
+                densities.append(uniform_density(body))
+            elif isinstance(body, Ring):
+                densities.append(self._ring_density(k, body))
+            else:
+                densities.append(self._slab_density(k, body))
         return densities
+
+    def _slab_density(self, k: int, slab: Plate) -> PlateDensity:
+        a, b = slab.width / 2, slab.height / 2
+        u, v = conductors.plate_face_grid(slab)
+        # the panels' centres, and the plate's edges with the outermost panels' σ
+        u, v = np.concatenate(([-a], u, [a])), np.concatenate(([-b], v, [b]))
+        inner, outer = (np.pad(face, 1, mode="edge") for face in self.conductor.faces[k])
+
+        def rim(name: str) -> np.ndarray:  # σ along a rim, averaged across the thickness
+            return np.pad(self.conductor.face(k, name).mean(axis=1), 1, mode="edge")
+
+        rim_u = np.array([rim("u-"), rim("u+")])
+        rim_v = np.array([rim("v-"), rim("v+")])
+        return PlateDensity(slab, u, v, inner, outer, rim_u, rim_v)
+
+    def _ring_density(self, k: int, ring: Ring) -> RingDensity:
+        faces = {}
+        for name in ring_face_names(ring):
+            edges, _ = conductors.ring_face_grid(ring, name)
+            # the panels' centres and the face's edges (with the outermost panels' σ), all the way round
+            along = np.concatenate(([edges[0]], (edges[1:] + edges[:-1]) / 2, [edges[-1]]))
+            sigma = np.pad(self.conductor.face(k, name), ((1, 1), (0, 0)), mode="edge")
+            faces[name] = (along, np.concatenate((sigma, sigma[:, :1]), axis=1))
+        return RingDensity(ring, ring_angles(), faces)
 
     def sphere_densities(self) -> list[tuple[np.ndarray, np.ndarray, np.ndarray | None]] | None:
         """For each metallic sphere: its surface's corner points, quads, and σ on each quad (C/m²).
@@ -203,14 +368,14 @@ class Scene:
         return self.conductor.charge(len(self.conductor_plates()) + k)
 
     def capacitor_readouts(self) -> dict[str, float] | None:
-        """E at the centre, ΔV between the plates' centres, Q, C, and the ideal (infinite plates) values."""
+        """E in the gap, ΔV between the plates, Q, C, and the ideal values (no edges); see Capacitor.probes."""
         cap = self.capacitor
         model = self.model()
         if cap is None or model is None:
             return None
-        plus, minus = cap.plates()
-        E_center = float(np.linalg.norm(model.field(np.zeros((1, 3)))[0]))
-        V = model.potential(np.array([plus.center, minus.center]))
+        center, plus, minus = cap.probes()
+        E_center = float(np.linalg.norm(model.field(center[None])[0]))
+        V = model.potential(np.array([plus, minus]))
         dV = float(V[0] - V[1])
         if self.uses_conductor:
             Q = self.conductor.charge(0)
@@ -218,20 +383,15 @@ class Scene:
         else:
             Q = cap.sigma * cap.area
             C = Q / dV if dV else math.nan
-        return dict(
-            E_center=E_center,
-            E_ideal=abs(Q) / cap.area / EPS0,
-            dV=dV,
-            Q=Q,
-            C=C,
-            C_ideal=EPS0 * cap.area / cap.separation,
-        )
+        E_ideal, C_ideal = cap.ideal(Q)
+        return dict(E_center=E_center, E_ideal=E_ideal, dV=dV, Q=Q, C=C, C_ideal=C_ideal)
 
     def model(self) -> FieldModel | None:
         """The field of the scene, or None while the conductor model is being computed."""
         if self.uses_conductor:
             return self.conductor
-        return Superposition([*self.charges, *self.plates()])
+        sheets = [conductors.UniformSheet(p) if isinstance(p, Ring) else p for p in self.plates()]
+        return Superposition([*self.charges, *sheets])
 
     def snapshot(self) -> FieldModel | None:
         """A copy of the field model that a worker thread can use while the scene keeps changing."""
@@ -248,8 +408,8 @@ class Scene:
                 charge.position[2] = 0.0
             for sphere in self.spheres:
                 sphere.center[2] = 0.0
-            if self.capacitor is not None and self.capacitor.normal == "z":
-                self.capacitor.normal = "x"
+            if self.capacitor is not None:
+                self.capacitor.normal = capacitor_axis(self.capacitor, True)
 
     def lines(self) -> list[FieldLine]:
         model = self.model()
@@ -257,7 +417,7 @@ class Scene:
             return []
         if self.planar:
             model = InThePlane(model)
-        # the lines start from and end on the plates as they are drawn, slabs, whatever the model
+        # the lines start from and end on the plates as they are drawn, with their thickness, whatever the model
         charges, plates, spheres = self.active_charges(), self.drawn_plates(), self.active_spheres()
         points, directions = seeding.seeds(
             model,

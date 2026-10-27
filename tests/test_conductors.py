@@ -23,7 +23,7 @@ def conductor_scene(key: str, planar: bool = False) -> Scene:
     scene.planar = planar
     scene.kind = "conductors"
     presets.load(scene, key)
-    scene.conductor = Solver(scene.conductor_plates(), scene.spheres).solve(scene.voltages())
+    scene.conductor = scene.solve(Solver(scene.conductor_plates(), scene.spheres))
     return scene
 
 
@@ -168,15 +168,25 @@ def test_touching_spheres_and_plates():
     assert not touching(plates, [Sphere([0, 0, 0.0], 0.01)])
     assert touching([], [Sphere([0, 0, 0], 0.02), Sphere([0.03, 0, 0], 0.015)])
     assert not touching(plates, [Sphere([0.09, 0, 0], 0.02)])
-    slabs = Capacitor(separation=0.03, thickness=0.004).slabs()
+    slabs = Capacitor(separation=0.03, thickness=0.004).bodies()
     assert touching(slabs, [Sphere([0, 0, 0.03], 0.0105)])  # within 1 mm of the outer face at 1.5 + 0.4 cm
     assert not touching(slabs, [Sphere([0, 0, 0.03], 0.0095)])
 
 
 @pytest.mark.parametrize("planar", [True, False])
-@pytest.mark.parametrize("key", ["capacitor", "sphere_in_capacitor", "two_spheres"])
+@pytest.mark.parametrize(
+    "key", ["capacitor", "sphere_in_capacitor", "two_spheres", "disc_capacitor", "cylindrical_capacitor", "along"]
+)
 def test_every_line_ends_on_a_conductor(key, planar):
-    scene = conductor_scene(key, planar)
+    if key == "along":  # the cylinder cut along its axis
+        scene = Scene()
+        scene.planar, scene.kind = planar, "conductors"
+        presets.load(scene, "cylindrical_capacitor")
+        scene.capacitor.cut = "along"
+        scene.capacitor.normal = "x"
+        scene.conductor = scene.solve(Solver(scene.conductor_plates(), scene.spheres))
+    else:
+        scene = conductor_scene(key, planar)
     lines = scene.lines()
     assert lines
     ends = [line.end for line in lines]
@@ -211,3 +221,73 @@ def test_plate_and_sphere_densities_for_drawing():
     assert scene.plate_densities() is None
     ((_, quads, sigma),) = scene.sphere_densities()
     assert sigma is None and len(quads) == 6 * conductors.SPHERE_PANELS**2
+
+
+def test_a_triangle_is_a_quad_with_two_corners_alike():
+    triangle = np.array([[[0.0, 0.0, 0.0], [0.03, 0.0, 0.0], [0.0, 0.02, 0.0]]]) - [0.01, 0.0066, 0.0]
+    quad = np.concatenate((triangle, triangle[:, :1]), axis=1)  # the first corner again
+    rel = np.random.default_rng(3).uniform(-0.05, 0.05, (50, 3))
+    normal = np.tile([0.0, 0.0, 1.0], (50, 1))
+    I3, G3 = conductors.polygon_terms(rel, np.repeat(triangle, 50, axis=0), normal)
+    I4, G4 = conductors.polygon_terms(rel, np.repeat(quad, 50, axis=0), normal)
+    np.testing.assert_allclose(I4, I3, rtol=1e-12)
+    np.testing.assert_allclose(G4, G3, rtol=1e-10, atol=1e-12)
+
+
+def test_uniform_disc_and_tube_sheets():
+    from field_lines.sources import Ring
+
+    R, sigma = 0.05, 1e-6
+    disc = conductors.UniformSheet(Ring(sigma, [0, 0, 0], 0.0, R, 0.0))
+    z = np.array([0.001, 0.01, 0.05])
+    on_axis = np.column_stack((np.zeros(3), np.zeros(3), z))
+    np.testing.assert_allclose(disc.field(on_axis)[:, 2], sigma / (2 * EPS0) * (1 - z / np.hypot(z, R)), rtol=2e-3)
+    np.testing.assert_allclose(disc.potential(on_axis), sigma / (2 * EPS0) * (np.hypot(z, R) - z), rtol=2e-3)
+    assert disc.panels.area.sum() == pytest.approx(np.pi * R * R, rel=1e-12)  # the round disc's charge
+    far = np.array([[3.0, 1.0, 2.0]])
+    point_charge = K * sigma * np.pi * R * R * far[0] / np.linalg.norm(far) ** 3
+    np.testing.assert_allclose(disc.field(far)[0], point_charge, rtol=1e-3)
+    a = 0.02
+    tube = conductors.UniformSheet(Ring(sigma, [0, 0, 0], a, a, 2.0, gap="out"))  # 4 m long
+    for r in (0.03, 0.05):  # a long tube: λ / (2π ε₀ r)
+        assert tube.field(np.array([[r, 0.0, 0.0]]))[0, 0] == pytest.approx(sigma * a / (EPS0 * r), rel=1e-3)
+
+
+def test_neutral_capacitor_keeps_its_potential_difference():
+    scene = conductor_scene("cylindrical_capacitor")
+    solution = scene.conductor
+    assert solution.charge(0) == pytest.approx(-solution.charge(1), rel=1e-9)
+    assert solution.voltages[0] - solution.voltages[1] == pytest.approx(scene.capacitor.voltage)
+    target = solution.voltages[solution.panels.owner]
+    np.testing.assert_allclose(solution.potential(solution.panels.centers), target, atol=2.0)
+
+
+def test_disc_capacitor_against_kirchhoff():
+    from field_lines.sources import Ring
+
+    R, d, t = 0.05, 0.01, 0.0005
+    plus = Ring(0.0, [0, 0, (d + t) / 2], 0.0, R, t / 2, gap="w-")
+    minus = Ring(0.0, [0, 0, -(d + t) / 2], 0.0, R, t / 2, gap="w+")
+    solution = Solver([plus, minus], []).solve([0.5, -0.5], neutral=[0, 1])
+    kirchhoff = EPS0 * (math.pi * R * R / d + R * (math.log(16 * math.pi * R / d) - 1))  # thin discs
+    assert solution.charge(0) == pytest.approx(kirchhoff, rel=0.05)
+    assert solution.charge(0) > EPS0 * math.pi * R * R / d
+    inner = solution.face(0, "w-")
+    assert inner[0].mean() == pytest.approx(EPS0 / d, rel=0.01)  # σ = ε₀ΔV/d in the middle
+    assert np.ptp(inner, axis=1).max() < 1e-6 * inner.max()  # the same all the way round
+    assert inner[-1].mean() > 2 * inner[0].mean()  # the charge crowds towards the rim
+
+
+def test_cylindrical_capacitor_field_and_charges():
+    scene = conductor_scene("cylindrical_capacitor")
+    solution, cap = scene.conductor, scene.capacitor
+    E = [np.linalg.norm(solution.field(np.array([[r, 0.0, 0.0]]))[0]) for r in (0.025, 0.035)]
+    assert E[0] * 0.025 == pytest.approx(E[1] * 0.035, rel=0.01)  # 1/r across the gap
+    a, b, L = cap.inner_radius, cap.outer_radius, cap.length
+    assert solution.charge(0) / cap.voltage > 2 * math.pi * EPS0 * L / math.log(b / a)  # the ends add some
+    middle = conductors.TUBE_PANELS // 2
+    hollow, gap = solution.face(0, "in")[middle], solution.face(0, "out")[middle]
+    assert np.abs(hollow).max() < 0.02 * gap.mean()  # hardly any charge inside the inner tube
+    readouts = scene.capacitor_readouts()
+    assert readouts["dV"] == pytest.approx(cap.voltage, rel=0.01)
+    assert readouts["E_center"] == pytest.approx(readouts["E_ideal"], rel=0.25)  # Q/L includes the ends

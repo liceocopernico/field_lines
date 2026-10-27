@@ -186,3 +186,38 @@ def test_seeds_cover_a_slab_and_its_rims():
     a, c = 0.05, 0.005
     faces = 2 * 4 * np.arcsin(a * a / (a * a + c * c))  # each face's solid angle from the centre
     assert on_rims.mean() == pytest.approx(1 - faces / (4 * np.pi), abs=0.03)
+
+
+def test_long_steps_do_not_jump_a_thin_tube_wall():
+    from field_lines.sources import Ring
+
+    tube = Ring(-1e-6, [0.0, 0.0, 0.0], 0.02, 0.0205, 0.05)  # a 0.5 mm wall
+
+    class Outwards:  # a radial field out of the axis
+        def field(self, p):
+            out = p.copy()
+            out[:, 2] = 0.0
+            return out / np.linalg.norm(out, axis=1, keepdims=True)
+
+    seeds = np.array([[0.005, 0.0, 0.0], [0.0, 0.004, 0.01], [-0.003, -0.003, -0.02]])
+    lines = trace(Outwards(), seeds, np.ones(3), plates=[tube], **(OPTIONS | dict(step_max=0.01)))
+    for line in lines:
+        assert line.end == "plate"
+        assert tube.distance(line.points[-1]) < 1e-12
+        assert np.hypot(*line.points[-1, :2]) == pytest.approx(0.02)  # on the inner face, not past the wall
+
+
+@pytest.mark.parametrize("cut", ["3d", "across", "along"])
+def test_seeds_on_a_tube(cut):
+    from field_lines.sources import Ring
+
+    tube = Ring(1e-6, [0.0, 0.0, 0.0], 0.02, 0.022, 0.05, "z" if cut != "along" else "x", gap="out")
+    model = PointCharge(1 * NC, [0.0, 0.0, 0.0])  # any field with flux out of all the faces
+    points = seeding.plate_seeds(model, tube, 40, 0.001, 1, planar=cut != "3d")
+    assert len(points) == 40
+    np.testing.assert_allclose(tube.distances(points), 0.001, atol=1e-9)  # just off the surface
+    if cut != "3d":
+        assert np.all(points[:, 2] == 0.0)  # in the plane
+    if cut == "across":  # on the two circles
+        rho = np.hypot(points[:, 0], points[:, 1])
+        assert np.all(np.isclose(rho, 0.019) | np.isclose(rho, 0.023))
