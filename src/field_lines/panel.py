@@ -11,6 +11,7 @@ from field_lines.scene import VIEW_HALF, Capacitor
 from field_lines.sources import AXES, PointCharge
 from field_lines.strings import LANGUAGES, language, tr
 from field_lines.units import CM, NC, UC_PER_M2
+from field_lines.view import SIGMA_PALETTES, SIGMA_SCALES
 
 COORDINATE_RANGE = VIEW_HALF / CM  # cm
 SLICE_STEPS = 100  # positions of the slice slider across the view
@@ -28,6 +29,8 @@ class ViewOptions:
     slice_axis: str = "z"
     slice_position: float = 0.0  # m
     plate_sigma: bool = False  # colour the capacitor's plates by their surface charge density
+    sigma_scale: str = "symmetric"  # how σ maps to colours: "symmetric", "contrast" or "log"
+    sigma_palette: str = "RdBu_r"
 
 
 def _emit(signal) -> Callable[..., None]:
@@ -274,6 +277,13 @@ class Panel(QtWidgets.QWidget):
         form.addRow(self._label("slice_axis"), self.slice_axis)
         form.addRow(self._label("slice_position"), self.slice_position)
         layout.addWidget(self.slice_form)
+        sigma_form = QtWidgets.QFormLayout()
+        sigma_form.setContentsMargins(0, 0, 0, 0)
+        self.sigma_scale = self._combo([f"scale_{s}" for s in SIGMA_SCALES], SIGMA_SCALES)
+        self.sigma_palette = self._combo([f"palette_{p}" for p in SIGMA_PALETTES], SIGMA_PALETTES)
+        sigma_form.addRow(self._label("sigma_scale"), self.sigma_scale)
+        sigma_form.addRow(self._label("sigma_palette"), self.sigma_palette)
+        layout.addLayout(sigma_form)
         for box in (self.lines_box, self.equipotentials_box, self.arrows_box, self.slice_box):
             box.toggled.connect(_emit(self.views_changed))
         for signal in (
@@ -281,6 +291,8 @@ class Panel(QtWidgets.QWidget):
             self.levels_box.valueChanged,
             self.slice_quantity.currentIndexChanged,
             self.slice_axis.currentIndexChanged,
+            self.sigma_scale.currentIndexChanged,
+            self.sigma_palette.currentIndexChanged,
             self.slice_position.valueChanged,
         ):
             signal.connect(_emit(self.views_changed))
@@ -500,4 +512,6 @@ class Panel(QtWidgets.QWidget):
             slice_axis=self.slice_axis.currentData(),
             slice_position=self.slice_position.value() / (SLICE_STEPS / 2) * VIEW_HALF,
             plate_sigma=self.plate_sigma_box.isChecked(),
+            sigma_scale=self.sigma_scale.currentData(),
+            sigma_palette=self.sigma_palette.currentData(),
         )

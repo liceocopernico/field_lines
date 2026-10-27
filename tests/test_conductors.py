@@ -31,7 +31,9 @@ def test_isolated_sphere_charge_and_density():
     R, V = 0.02, 1000.0
     solution = Solver([], [Sphere([0.01, -0.02, 0.03], R, V)]).solve([V])
     assert solution.charge(0) == pytest.approx(4 * math.pi * EPS0 * R * V, rel=5e-3)
-    np.testing.assert_allclose(solution.sphere_sigma(0), EPS0 * V / R, rtol=0.08)
+    sigma = solution.sphere_sigma(0)
+    np.testing.assert_allclose(sigma, EPS0 * V / R, rtol=0.015)  # the flat panels cover 0.8% less area
+    assert sigma.max() - sigma.min() < 0.005 * sigma.mean()  # uniform: no trace of the cube's corners
 
 
 def test_isolated_sphere_looks_like_a_point_charge_outside():

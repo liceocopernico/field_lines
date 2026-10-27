@@ -106,3 +106,63 @@ def test_plates_coloured_by_density_in_3d(plotter):
     # the + plate is at z = +1.5 cm: its inner face is the lower one
     assert inner.points[:, 2].max() < outer.points[:, 2].min()
     assert np.allclose(inner["sigma"], 0.2) and np.allclose(outer["sigma"], 0.2)  # μC/m²
+
+
+def test_lines_are_drawn_only_inside_the_drawing_box():
+    from field_lines.view import DRAW_HALF, _inside_box
+
+    # out of the box along +x, around, and back in along -x
+    points = np.array([[0.0, 0, 0], [0.3, 0, 0], [5.0, 0, 0], [5.0, 4.0, 0], [-5.0, 4.0, 0], [-0.2, 0.1, 0], [-0.1, 0, 0]])
+    values = np.arange(len(points), dtype=float)
+    pieces = _inside_box(points, values, DRAW_HALF)
+    assert len(pieces) == 2
+    (out_piece, out_values), (back_piece, _) = pieces
+    np.testing.assert_allclose(out_piece[-1], [DRAW_HALF, 0, 0])  # leaves exactly on the box
+    assert out_values[-1] == pytest.approx(1 + (DRAW_HALF - 0.3) / 4.7)
+    assert np.abs(back_piece[0]).max() == pytest.approx(DRAW_HALF)  # comes back in on the box
+    np.testing.assert_allclose(back_piece[-1], [-0.1, 0, 0])
+    inside = np.array([[0.0, 0, 0], [0.1, 0.1, 0.1]])
+    assert len(_inside_box(inside, np.zeros(2), DRAW_HALF)) == 1
+
+
+def test_sigma_colour_scales():
+    from field_lines.view import sigma_colours
+
+    values = np.concatenate((np.linspace(0.95, 1.05, 98), [-3.0, 4.0]))  # μC/m²: small differences, two spikes
+    symmetric = sigma_colours(values, "symmetric")
+    assert symmetric.clim[0] == -symmetric.clim[1] > -4.0  # centred on 0, spikes left out
+    contrast = sigma_colours(values, "contrast")
+    assert 0.9 < contrast.clim[0] < 1.0 and 1.0 < contrast.clim[1] < 1.1  # only the bulk: small differences show
+    log = sigma_colours(values, "log")
+    assert 0 < log.clim[0] < log.clim[1] == 4.0
+    uniform = sigma_colours(np.full(10, 0.2), "contrast")  # one value: still a valid range around it
+    assert uniform.clim[0] < 0.2 < uniform.clim[1]
+    almost = sigma_colours(0.4466 + 0.0009 * np.random.default_rng(0).random(100), "contrast")
+    assert almost.clim[1] - almost.clim[0] >= 0.02 * 0.4466  # finer than the solver's error: not stretched
+
+
+def test_contrast_scale_on_a_sphere_between_plates(plotter):
+    from field_lines.conductors import Solver
+    from field_lines.strings import tr
+
+    scene = Scene()
+    scene.kind = "conductors"
+    presets.load(scene, "sphere_in_capacitor")
+    scene.conductor = Solver(scene.conductor_plates(), scene.spheres).solve(scene.voltages())
+    view = SceneView(plotter)
+    for scale, title in (("symmetric", "bar_sigma"), ("contrast", "bar_sigma"), ("log", "bar_sigma_abs")):
+        view.set_plates(scene.plates(), scene.plate_densities(), False, scene.sphere_densities(), scale, "viridis")
+        assert list(plotter.scalar_bars.keys()) == [tr(title)]
+        lo, hi = view.sphere_actors[0][0].mapper.scalar_range
+        if scale == "log":
+            assert 0 < lo < hi
+        else:
+            assert lo < 0 < hi  # the grounded sphere is charged both ways
+
+
+def test_sigma_colour_bar_labels_are_readable():
+    from field_lines.view import SigmaColours
+
+    assert SigmaColours("contrast", "viridis", (-0.91, 0.91)).label_format == "%.2f"  # 0 prints as 0.00
+    assert SigmaColours("contrast", "viridis", (0.4462, 0.4483)).label_format == "%.5f"  # tiny ranges keep digits
+    assert SigmaColours("log", "viridis", (0.03, 2.3)).label_format == "%.2g"

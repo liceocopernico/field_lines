@@ -50,7 +50,19 @@ The panel on the right holds:
   (conductors model), and an option to colour the plates by their surface
   charge density (red +, blue −).
 - **Show:** field lines (lines per nC), equipotentials (number of levels),
-  arrows, and the coloured plane (V or |E|, its axis and position).
+  arrows, the coloured plane (V or |E|, its axis and position), and how σ
+  is coloured on plates and spheres:
+  - scale *symmetric*: centred on 0, red + and blue − (with the red-blue
+    palette): shows the sign;
+  - scale *contrast*: from the smallest to the largest σ shown (2nd to 98th
+    percentile), so that small differences spread over the whole palette;
+    it never spans less than 2% of the typical σ, because the conductors
+    are solved to a few tenths of a percent and finer differences would
+    only show the panels;
+  - scale *logarithmic*: |σ| on a log scale, for differences of orders of
+    magnitude (a plate's outer face against its edges), and to see the
+    variations on each of several spheres of opposite signs;
+  - palette: red-blue, viridis, plasma, turbo, cividis or greys.
 - **Animation:** replay the growth of the lines, and set its speed.
 - **Language.**
 
@@ -107,7 +119,10 @@ Everything inside is in SI units; the panel shows nC, cm, μC/m², V, V/m, pF.
   leaves the screen and reappears where it comes back.
 - A line stops at an opposite charge or plate, on any conductor (plate or
   sphere) in the conductors model, at a null point (where it turns back on
-  itself), or 100 m away.
+  itself), or 100 m away. It is drawn only within half a metre of the
+  centre: VTK fits its camera's depth range to everything drawn, and lines
+  100 m long made clicks so imprecise that a sphere caught every drag and
+  the view could not be rotated.
 
 **Uniform-σ plates.** E and V of a uniformly charged rectangle come from
 their closed-form integrals, not from summing many small charges. In the
@@ -121,6 +136,10 @@ elements, or the method of moments):
 - each surface is cut into small flat panels with a uniform σ: a plate into
   25 × 25 panels, finer towards its edges; a sphere into 384 panels, a cube
   projected onto it;
+- each panel counts with its true shape (the closed-form potential and field
+  of a flat polygon). The cube's corners make kite-shaped panels on a
+  sphere; counting them as squares had left σ 7% off there. Now an isolated
+  sphere's σ is uniform to 0.2%;
 - the densities are chosen so that the centre of every panel is at its
   conductor's potential. That solves Laplace's equation outside the
   conductors, with V → 0 far away, without a grid;

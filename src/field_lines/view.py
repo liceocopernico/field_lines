@@ -1,6 +1,7 @@
 """The PyVista side: actors for lines and plates, and the 2D/3D camera."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import pyvista as pv
@@ -23,9 +24,62 @@ PLATE_THICKNESS = 0.0015  # m, only for drawing
 FACE_STRIP = 0.002  # m: in 2D each face of a cut plate is drawn as a strip this wide, a sphere's rim as a ring
 PLANE_BELOW = 0.0003  # m: in 2D a sphere's inside is drawn just below the lines
 SPHERE_INSIDE = (0.85, 0.85, 0.85)
-SIGMA_BAR = dict(vertical=False, position_x=0.3, position_y=0.02, width=0.4, height=0.1, fmt="%.2g")
+SIGMA_BAR = dict(vertical=False, position_x=0.3, position_y=0.02, width=0.4, height=0.1)
+SIGMA_SCALES = ("symmetric", "contrast", "log")
+SIGMA_PALETTES = ("RdBu_r", "viridis", "plasma", "turbo", "cividis", "Greys")
+# The contrast scale never spreads its colours over less than this fraction of the typical |σ|: the
+# conductors are solved to about 0.2-0.5%, and stretching finer differences would show the panels.
+CONTRAST_FLOOR = 0.02
 # plasma without its palest yellow, which vanishes on white
 LINE_CMAP = ListedColormap(colormaps["plasma"](np.linspace(0.0, 0.85, 256)))
+
+
+@dataclass
+class SigmaColours:
+    """How σ (in μC/m²) maps to colours: the scale, the palette and the range."""
+
+    scale: str  # "symmetric": centred on 0, shows the sign; "contrast": the values' own range; "log": |σ|
+    palette: str
+    clim: tuple[float, float]
+
+    @property
+    def title(self) -> str:
+        return tr("bar_sigma_abs" if self.scale == "log" else "bar_sigma")
+
+    @property
+    def label_format(self) -> str:
+        """Fixed decimals enough to tell the labels apart (a %g format would print 0 as -2.7e-15)."""
+        if self.scale == "log":
+            return "%.2g"
+        span = self.clim[1] - self.clim[0]
+        decimals = int(np.clip(2 - np.floor(np.log10(span)), 0, 8)) if span > 0 else 2
+        return f"%.{decimals}f"
+
+
+def sigma_colours(values: np.ndarray, scale: str = "symmetric", palette: str = "RdBu_r") -> SigmaColours:
+    """The colour range for these σ values (μC/m²).
+
+    symmetric: ±(95th percentile of |σ|), so a few sharp edges do not wash out the rest;
+    contrast: 2nd to 98th percentile, so that small differences spread over the whole palette
+    (but at least CONTRAST_FLOOR of the typical |σ|);
+    log: |σ| from its 2nd percentile to its largest value.
+    """
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        values = np.ones(1)
+    if scale == "log":
+        magnitude = np.abs(values[values != 0]) if np.any(values != 0) else np.ones(1)
+        lo, hi = float(np.percentile(magnitude, 2)), float(magnitude.max())
+        return SigmaColours(scale, palette, (lo, max(hi, 1.01 * lo)))
+    if scale == "contrast":
+        lo, hi = (float(v) for v in np.percentile(values, [2, 98]))
+        floor = CONTRAST_FLOOR * (float(np.median(np.abs(values))) or 1e-6)
+        if hi - lo < floor:  # (nearly) one value everywhere: a range just wider than the solver's error
+            middle = (lo + hi) / 2
+            lo, hi = middle - floor / 2, middle + floor / 2
+        return SigmaColours(scale, palette, (lo, hi))
+    limit = float(np.percentile(np.abs(values), 95)) or 1.0
+    return SigmaColours(scale, palette, (-limit, limit))
 
 
 def sign_color(value: float) -> tuple[float, float, float]:
@@ -42,6 +96,10 @@ def _percentile_range(values: np.ndarray) -> tuple[float, float]:
 
 
 SHOWN_HALF = 1.5 * VIEW_HALF  # line pieces beyond this are off screen
+# Lines are traced up to 100 m away, but drawn only within this box: VTK sizes the camera's depth
+# range to everything drawn, and with lines 100 m long its picking tolerance grows so large that a
+# metal sphere's handle catches every click and the camera no longer rotates.
+DRAW_HALF = 0.5  # m
 
 
 def shown_length(line: FieldLine) -> np.ndarray:
@@ -63,17 +121,58 @@ def truncated_lines(lines: Sequence[FieldLine], limits: np.ndarray, lengths: Seq
             t = (limit - s[k - 1]) / (s[k] - s[k - 1])
             pts = np.vstack((pts, line.points[k - 1] + t * (line.points[k] - line.points[k - 1])))
             mags = np.append(mags, line.strength[k - 1] + t * (line.strength[k] - line.strength[k - 1]))
-        if len(pts) < 2:
-            continue
-        points.append(pts)
-        strengths.append(mags)
-        cells.append(np.concatenate(([len(pts)], np.arange(offset, offset + len(pts)))))
-        offset += len(pts)
+        for piece, piece_mags in _inside_box(pts, mags, DRAW_HALF):
+            points.append(piece)
+            strengths.append(piece_mags)
+            cells.append(np.concatenate(([len(piece)], np.arange(offset, offset + len(piece)))))
+            offset += len(piece)
     if not points:
         return pv.PolyData()
     mesh = pv.PolyData(np.concatenate(points), lines=np.concatenate(cells))
     mesh.point_data["E"] = np.maximum(np.concatenate(strengths), 1e-30)
     return mesh
+
+
+def _inside_box(points: np.ndarray, values: np.ndarray, half: float):
+    """The pieces of a polyline (and of values along it) inside the box |x|, |y|, |z| <= half.
+
+    A piece that leaves or enters the box ends exactly on its surface.
+    """
+    if len(points) < 2:
+        return []
+    inside = np.all(np.abs(points) <= half, axis=1)
+    if inside.all():
+        return [(points, values)]
+    pieces = []
+    start = None  # where the current piece begins: (index, boundary point or None, value)
+    for i in range(len(points)):
+        if inside[i] and start is None:
+            start = (i, None, None) if i == 0 or inside[i - 1] else (i, *_crossing(points, values, i, i - 1, half))
+        if start is not None and (i == len(points) - 1 or not inside[i + 1]):
+            first, entry, entry_value = start
+            piece, piece_values = [points[first : i + 1]], [values[first : i + 1]]
+            if entry is not None:
+                piece.insert(0, entry[None])
+                piece_values.insert(0, [entry_value])
+            if i < len(points) - 1:
+                exit_point, exit_value = _crossing(points, values, i, i + 1, half)
+                piece.append(exit_point[None])
+                piece_values.append([exit_value])
+            piece = np.concatenate(piece)
+            if len(piece) >= 2:
+                pieces.append((piece, np.concatenate(piece_values)))
+            start = None
+    return pieces
+
+
+def _crossing(points: np.ndarray, values: np.ndarray, inner: int, outer: int, half: float):
+    """Where the segment from points[inner] (inside the box) to points[outer] (outside) meets its surface."""
+    a, b = points[inner], points[outer]
+    d = b - a
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(d != 0, (np.sign(d) * half - a) / d, np.inf)
+    t = float(np.clip(t[t >= 0].min(initial=1.0), 0.0, 1.0))
+    return a + t * d, values[inner] + t * (values[outer] - values[inner])
 
 
 def _inner_side(plate: Plate) -> float:
@@ -273,28 +372,30 @@ class SceneView:
         densities: Sequence[PlateDensity] | None = None,
         planar: bool = False,
         spheres: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
+        scale: str = "symmetric",
+        palette: str = "RdBu_r",
     ) -> None:
         """The plates (plain red and blue, or each face coloured by its σ) and the metallic spheres (by σ).
 
         spheres: for each sphere its corner points, quads and σ per quad, as Scene.sphere_densities gives.
+        scale, palette: how σ maps to colours (see sigma_colours), one range for all of them.
         """
         for actor in self.plate_actors + [a for actors in self.sphere_actors for a in actors]:
             self.pl.remove_actor(actor, render=False)
         self.plate_actors, self.sphere_actors, self.sphere_centers = [], [], []
-        for language in LANGUAGES:  # removing the actors leaves their colour bar behind
-            if STRINGS["bar_sigma"][language] in self.pl.scalar_bars:
-                self.pl.remove_scalar_bar(STRINGS["bar_sigma"][language], render=False)
+        for key in ("bar_sigma", "bar_sigma_abs"):  # removing the actors leaves their colour bar behind
+            for language in LANGUAGES:
+                if STRINGS[key][language] in self.pl.scalar_bars:
+                    self.pl.remove_scalar_bar(STRINGS[key][language], render=False)
         values = [np.concatenate((d.inner.ravel(), d.outer.ravel())) for d in densities or []]
         values += [sigma for _, _, sigma in spheres or [] if sigma is not None]
-        limit = 1.0
-        if values:  # the edges may saturate
-            limit = float(np.percentile(np.abs(np.concatenate(values)), 95)) / UC_PER_M2 or 1.0
+        colours = sigma_colours(np.concatenate(values) / UC_PER_M2 if values else np.zeros(0), scale, palette)
         if densities:
-            self._coloured_plates(densities, planar, limit)
+            self._coloured_plates(densities, planar, colours)
         for points, quads, sigma in spheres or []:
-            self._coloured_sphere(points, quads, sigma, planar, limit)
-        if tr("bar_sigma") in self.pl.scalar_bars:
-            self.pl.scalar_bars[tr("bar_sigma")].SetTextPositionToPrecedeScalarBar()  # labels clear of the title
+            self._coloured_sphere(points, quads, sigma, planar, colours)
+        if colours.title in self.pl.scalar_bars:
+            self.pl.scalar_bars[colours.title].SetTextPositionToPrecedeScalarBar()  # labels clear of the title
         if densities:
             return
         for plate in plates:
@@ -307,25 +408,30 @@ class SceneView:
             )
             self.plate_actors.append(actor)
 
-    def _sigma_mesh(self, mesh, limit: float, planar: bool, **style):
+    def _sigma_mesh(self, mesh, colours: SigmaColours, planar: bool, **style):
+        scalars = "sigma"
+        if colours.scale == "log":
+            mesh.point_data["abs_sigma"] = np.maximum(np.abs(mesh["sigma"]), 1e-3 * colours.clim[0])
+            scalars = "abs_sigma"
         return self.pl.add_mesh(
             mesh,
-            scalars="sigma",
-            cmap=V_CMAP,
-            clim=(-limit, limit),
+            scalars=scalars,
+            cmap=colours.palette,
+            clim=colours.clim,
+            log_scale=colours.scale == "log",
             lighting=not planar,
             pickable=False,
             reset_camera=False,
-            scalar_bar_args=SIGMA_BAR | dict(title=tr("bar_sigma")),
+            scalar_bar_args=SIGMA_BAR | dict(title=colours.title, fmt=colours.label_format),
             **style,
         )
 
-    def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool, limit: float) -> None:
+    def _coloured_plates(self, densities: Sequence[PlateDensity], planar: bool, colours: SigmaColours) -> None:
         for density in densities:
             for mesh in face_strips(density) if planar else face_sheets(density):
-                self.plate_actors.append(self._sigma_mesh(mesh, limit, planar))
+                self.plate_actors.append(self._sigma_mesh(mesh, colours, planar))
 
-    def _coloured_sphere(self, points, quads, sigma: np.ndarray | None, planar: bool, limit: float):
+    def _coloured_sphere(self, points, quads, sigma: np.ndarray | None, planar: bool, colours: SigmaColours):
         """A metallic sphere coloured by σ, or plain grey while σ is not known yet."""
         center = points.mean(axis=0)
         if planar:
@@ -333,7 +439,7 @@ class SceneView:
             disc = pv.Disc(center=center - [0, 0, PLANE_BELOW], inner=0.0, outer=radius, c_res=72)
             actors = [self.pl.add_mesh(disc, color=SPHERE_INSIDE, lighting=False, pickable=False, reset_camera=False)]
             if sigma is not None:
-                actors.append(self._sigma_mesh(sphere_ring(points, quads, sigma), limit, planar))
+                actors.append(self._sigma_mesh(sphere_ring(points, quads, sigma), colours, planar))
         else:
             mesh = pv.PolyData(points, np.hstack((np.full((len(quads), 1), 4), quads)).ravel())
             if sigma is None:
@@ -345,7 +451,7 @@ class SceneView:
             else:
                 mesh.cell_data["sigma"] = sigma / UC_PER_M2
                 mesh = mesh.clean().cell_data_to_point_data()  # smooth colours across the panels
-                actors = [self._sigma_mesh(mesh, limit, planar, smooth_shading=True)]
+                actors = [self._sigma_mesh(mesh, colours, planar, smooth_shading=True)]
         self.sphere_actors.append(actors)
         self.sphere_centers.append(center)
 

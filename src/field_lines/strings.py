@@ -88,6 +88,19 @@ STRINGS: dict[str, dict[str, str]] = {
     "bar_V": {"it": "V [V]", "en": "V [V]"},
     "bar_slice_E": {"it": "E sul piano [V/m]", "en": "E on the plane [V/m]"},
     "bar_sigma": {"it": "densità di carica [μC/m²]", "en": "charge density [μC/m²]"},  # VTK's font has no σ
+    "bar_sigma_abs": {"it": "modulo della densità di carica [μC/m²]", "en": "magnitude of the charge density [μC/m²]"},
+    # colours of σ
+    "sigma_scale": {"it": "Scala di σ", "en": "σ scale"},
+    "scale_symmetric": {"it": "simmetrica (segno)", "en": "symmetric (sign)"},
+    "scale_contrast": {"it": "contrasto (minimo–massimo)", "en": "contrast (minimum–maximum)"},
+    "scale_log": {"it": "logaritmica (modulo)", "en": "logarithmic (magnitude)"},
+    "sigma_palette": {"it": "Colori di σ", "en": "σ colours"},
+    "palette_RdBu_r": {"it": "rosso-blu", "en": "red-blue"},
+    "palette_viridis": {"it": "viridis", "en": "viridis"},
+    "palette_plasma": {"it": "plasma", "en": "plasma"},
+    "palette_turbo": {"it": "turbo (arcobaleno)", "en": "turbo (rainbow)"},
+    "palette_cividis": {"it": "cividis", "en": "cividis"},
+    "palette_Greys": {"it": "grigi", "en": "greys"},
 }
 
 _language = "it"

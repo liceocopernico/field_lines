@@ -172,7 +172,7 @@ def test_conductor_model_is_solved_in_the_background(window, qtbot):
     wait_for_solve(window, qtbot)
     assert window.panel.model_status.text() == ""
     assert window.panel.readouts["readout_dV"].text() == "500 V"
-    assert window.panel.readouts["readout_C"].text() == "5.27 pF"
+    assert window.panel.readouts["readout_C"].text() == "5.26 pF"
     assert all(line.end == "plate" for line in window.view.lines)
     # a new ΔV needs no new solve
     window.panel.voltage_box.setValue(1000)
@@ -355,3 +355,33 @@ def test_click_on_a_metal_sphere_seeds_nothing(window, qtbot):
     qtbot.wait(50)
     window._clicked(tuple(to_display(window.plotter, window.scene.spheres[0].center + [0.005, 0, 0])))
     assert window.scene.click_seeds == []
+
+
+def test_the_view_keeps_rotating_with_lines_that_go_far(window, qtbot):
+    """Lines traced 100 m out once made VTK's picking so loose that a sphere's handle caught every drag."""
+    corner = QtCore.QPoint(60, 60)
+    for preset in ("sphere", "single", "sphere_in_capacitor"):
+        window.load_preset(preset)
+        wait_for_solve(window, qtbot)
+        for _ in range(3):
+            camera = window.plotter.renderer.GetActiveCamera()
+            before = np.array(camera.GetPosition())
+            qtbot.mousePress(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=corner)
+            for k in range(1, 6):
+                qtbot.mouseMove(window.plotter, corner + QtCore.QPoint(16 * k, 6 * k))
+            qtbot.mouseRelease(window.plotter, QtCore.Qt.MouseButton.LeftButton, pos=corner + QtCore.QPoint(80, 30))
+            assert np.linalg.norm(np.array(camera.GetPosition()) - before) > 0.05, preset
+        assert np.abs(window.plotter.renderer.ComputeVisiblePropBounds()).max() <= 0.5 + 1e-9
+
+
+def test_choosing_the_sigma_colour_scale(window, qtbot):
+    window.load_preset("sphere")
+    wait_for_solve(window, qtbot)
+    symmetric = window.view.sphere_actors[0][0].mapper.scalar_range
+    window.panel.sigma_scale.setCurrentIndex(window.panel.sigma_scale.findData("contrast"))
+    window.panel.sigma_palette.setCurrentIndex(window.panel.sigma_palette.findData("turbo"))
+    lo, hi = window.view.sphere_actors[0][0].mapper.scalar_range
+    assert lo > 0 and hi - lo < 0.1 * (symmetric[1] - symmetric[0])  # a uniform sphere: a narrow range...
+    assert hi - lo >= 0.019 * (lo + hi) / 2  # ...but not narrower than the solver's accuracy
+    window.panel.sigma_scale.setCurrentIndex(window.panel.sigma_scale.findData("log"))
+    assert tr("bar_sigma_abs") in window.plotter.scalar_bars and tr("bar_sigma") not in window.plotter.scalar_bars

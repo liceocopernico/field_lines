@@ -201,8 +201,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_plates(self) -> None:
         """The plates (coloured by σ if the panel asks for it) and the metallic spheres (always by σ)."""
-        densities = self.scene.plate_densities() if self.panel.view_options().plate_sigma else None
-        self.view.set_plates(self.scene.plates(), densities, self.scene.planar, self.scene.sphere_densities())
+        options = self.panel.view_options()
+        densities = self.scene.plate_densities() if options.plate_sigma else None
+        self.view.set_plates(
+            self.scene.plates(),
+            densities,
+            self.scene.planar,
+            self.scene.sphere_densities(),
+            options.sigma_scale,
+            options.sigma_palette,
+        )
 
     def _sphere_charges(self) -> list[float | None]:
         return [self.scene.sphere_charge(k) for k in range(len(self.scene.spheres))]

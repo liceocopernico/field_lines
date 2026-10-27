@@ -13,10 +13,13 @@ outside the conductors with V -> 0 far away, without a grid.
 - A sphere is a cube projected onto it: 6 faces of SPHERE_PANELS x
   SPHERE_PANELS panels.
 
-The potential or the field of a panel at a point is that of a uniformly
-charged rectangle when the point is within NEAR panel sizes, and that of a
-point charge farther away. The same rule builds the matrix of the solve and
-evaluates the field afterwards, so the potentials come out as asked.
+The potential or the field of a panel at a point is that of the uniformly
+charged flat polygon it is (closed form, summed over its edges) when the
+point is within NEAR panel sizes, and that of a point charge farther away.
+The same rule builds the matrix of the solve and evaluates the field
+afterwards, so the potentials come out as asked. Panels count with their
+true shape: the cube's corners make kite-shaped panels on a sphere, and
+counting them as squares would leave σ 7% off there.
 
 The matrix depends only on the geometry; its LU factors are kept in a
 Solver, and a new set of potentials is a quick Solver.solve(voltages).
@@ -33,7 +36,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve
 
-from field_lines.sources import Plate, rectangle_field, rectangle_potential
+from field_lines.sources import Plate
 from field_lines.units import EPS0, K
 
 PLATE_PANELS = 25  # per side of a plate; odd, so that a row of panels lies on each centre line
@@ -58,25 +61,21 @@ class Sphere:
 @dataclass
 class Panels:
     centers: np.ndarray  # (N, 3)
-    frames: np.ndarray  # (N, 3, 3): rows e_u, e_v and the normal n
-    half_u: np.ndarray  # (N,) half sides along e_u and e_v
-    half_v: np.ndarray
+    normals: np.ndarray  # (N, 3)
+    corners: np.ndarray  # (N, 4, 3) relative to the centres, in each panel's plane, counter-clockwise about its normal
     owner: np.ndarray  # (N,) index of the conductor the panel belongs to
 
-    @property
-    def area(self) -> np.ndarray:
-        return 4 * self.half_u * self.half_v
-
-    @property
-    def size(self) -> np.ndarray:
-        return 2 * np.maximum(self.half_u, self.half_v)
+    def __post_init__(self):
+        cross = sum(np.cross(self.corners[:, e], self.corners[:, (e + 1) % 4]) for e in range(4))
+        self.area = 0.5 * np.einsum("pk,pk->p", cross, self.normals)
+        self.size = 2 * np.linalg.norm(self.corners, axis=2).max(axis=1)
 
     def __len__(self) -> int:
         return len(self.centers)
 
 
 def _join(parts: Sequence[Panels]) -> Panels:
-    fields = ("centers", "frames", "half_u", "half_v", "owner")
+    fields = ("centers", "normals", "corners", "owner")
     return Panels(*(np.concatenate([getattr(p, f) for p in parts]) for f in fields))
 
 
@@ -98,15 +97,10 @@ def plate_panels(plate: Plate, owner: int, n: int | None = None) -> Panels:
     cu, cv = plate_face_grid(plate, n)
     uu, vv = np.meshgrid(cu, cv, indexing="ij")
     local = np.column_stack((uu.ravel(), vv.ravel(), np.zeros(uu.size)))
-    axes = plate.from_local(np.eye(3))  # rows: the global directions of local u, v, w
-    hu, hv = np.meshgrid(np.diff(eu) / 2, np.diff(ev) / 2, indexing="ij")
-    return Panels(
-        plate.from_local(local) + plate.center,
-        np.repeat(axes[None], uu.size, axis=0),
-        hu.ravel(),
-        hv.ravel(),
-        np.full(uu.size, owner),
-    )
+    e_u, e_v, normal = plate.from_local(np.eye(3))  # the global directions of local u, v, w
+    hu, hv = (h.ravel()[:, None] for h in np.meshgrid(np.diff(eu) / 2, np.diff(ev) / 2, indexing="ij"))
+    corners = np.stack((-hu * e_u - hv * e_v, hu * e_u - hv * e_v, hu * e_u + hv * e_v, -hu * e_u + hv * e_v), axis=1)
+    return Panels(plate.from_local(local) + plate.center, np.repeat(normal[None], uu.size, axis=0), corners, np.full(uu.size, owner))
 
 
 def sphere_mesh(center: np.ndarray, radius: float, m: int | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -137,28 +131,60 @@ def sphere_mesh(center: np.ndarray, radius: float, m: int | None = None) -> tupl
 
 
 def sphere_panels(sphere: Sphere, owner: int, m: int | None = None) -> Panels:
+    """The sphere's quads, each flattened onto the plane touching the sphere at its centre."""
     points, quads = sphere_mesh(sphere.center, sphere.radius, m)
-    corners = points[quads]  # (n, 4, 3)
-    normal = corners.mean(axis=1) - sphere.center
+    quad = points[quads]  # (n, 4, 3)
+    normal = quad.mean(axis=1) - sphere.center
     normal /= np.linalg.norm(normal, axis=1, keepdims=True)
-    e_u = corners[:, 1] - corners[:, 0]
-    e_u -= np.einsum("ij,ij->i", e_u, normal)[:, None] * normal
-    e_u /= np.linalg.norm(e_u, axis=1, keepdims=True)
-    e_v = np.cross(normal, e_u)
-    flat = 0.5 * np.linalg.norm(np.cross(corners[:, 2] - corners[:, 0], corners[:, 3] - corners[:, 1]), axis=1)
-    area = flat * 4 * np.pi * sphere.radius**2 / flat.sum()  # the whole sphere, shared as the flat quads share it
-    half = np.sqrt(area) / 2  # each panel a square of its area
-    return Panels(
-        sphere.center + sphere.radius * normal,
-        np.stack((e_u, e_v, normal), axis=1),
-        half,
-        half.copy(),
-        np.full(len(quads), owner),
-    )
+    centers = sphere.center + sphere.radius * normal
+    corners = quad - centers[:, None, :]
+    corners -= np.einsum("pek,pk->pe", corners, normal)[:, :, None] * normal[:, None, :]
+    turn = np.einsum("pk,pk->p", np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), normal)
+    corners[turn < 0] = corners[turn < 0, ::-1]  # counter-clockwise seen from outside
+    return Panels(centers, normal, corners, np.full(len(quads), owner))
 
 
-def _local(rel: np.ndarray, frames: np.ndarray) -> np.ndarray:
-    return np.einsum("pk,pak->pa", rel, frames)
+def polygon_terms(rel: np.ndarray, corners: np.ndarray, normal: np.ndarray, field: bool = True):
+    """∫∫ dA/R over flat polygons at points rel from their centres, and the field it gives.
+
+    rel (P, 3); corners (P, k, 3) relative to the centres, in the polygons' planes, counter-clockwise
+    seen from normal (P, 3). Returns I (P,) and G (P, 3) (None if not asked), with V = k σ I and
+    E = k σ G. Each edge adds its log term (in the plane) and the solid angle it spans (across).
+    """
+    w = np.einsum("pk,pk->p", rel, normal)
+    foot = rel - w[:, None] * normal  # the point's foot on the plane
+    aw = np.abs(w)
+    I = np.zeros(len(rel))
+    G = np.zeros((len(rel), 3)) if field else None
+    solid_angle = np.zeros(len(rel))
+    k = corners.shape[1]
+    for e in range(k):
+        a, b = corners[:, e], corners[:, (e + 1) % k]
+        edge = b - a
+        length = np.linalg.norm(edge, axis=1)
+        along = edge / length[:, None]
+        out = np.cross(along, normal)  # in the plane, out of the polygon
+        l_minus = np.einsum("pk,pk->p", a - foot, along)
+        l_plus = l_minus + length
+        p0 = np.einsum("pk,pk->p", a - foot, out)
+        r0 = np.sqrt(p0 * p0 + w * w)
+        r_minus = np.sqrt(l_minus**2 + r0**2)
+        r_plus = np.sqrt(l_plus**2 + r0**2)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_term = np.where(r0 > 0, np.arcsinh(l_plus / r0) - np.arcsinh(l_minus / r0), 0.0)
+            angle = np.where(
+                r0 > 0,
+                np.arctan2(p0 * l_plus, r0**2 + aw * r_plus) - np.arctan2(p0 * l_minus, r0**2 + aw * r_minus),
+                0.0,
+            )
+        I += p0 * log_term
+        solid_angle += angle
+        if field:
+            G += out * log_term[:, None]
+    I -= aw * solid_angle
+    if field:
+        G += normal * (np.sign(w) * solid_angle)[:, None]
+    return I, G
 
 
 def _near_pairs(d: np.ndarray, size: np.ndarray):
@@ -175,8 +201,7 @@ def interaction_matrix(panels: Panels) -> np.ndarray:
         with np.errstate(divide="ignore"):
             block = K * panels.area[None, :] / d
         i, j = _near_pairs(d, panels.size)
-        local = _local(rel[i, j], panels.frames[j])
-        block[i, j] = K * rectangle_potential(local[:, 0], local[:, 1], local[:, 2], panels.half_u[j], panels.half_v[j])
+        block[i, j] = K * polygon_terms(rel[i, j], panels.corners[j], panels.normals[j], field=False)[0]
         A[start : start + CHUNK] = block
     return A
 
@@ -225,15 +250,14 @@ def _panel_terms(panels: Panels, sigma: np.ndarray, rel: np.ndarray, j: np.ndarr
     q = sigma[j] * panels.area[j]
     inv = np.where(near, 0.0, 1.0 / np.where(near, 1.0, d))
     jn = j[near]
-    local = _local(rel[near], panels.frames[jn])
-    args = (local[:, 0], local[:, 1], local[:, 2], panels.half_u[jn], panels.half_v[jn])
+    I, G = polygon_terms(rel[near], panels.corners[jn], panels.normals[jn], field)
     V = E = None
     if potential:
         V = q * inv
-        V[near] = sigma[jn] * rectangle_potential(*args)
+        V[near] = sigma[jn] * I
     if field:
         E = (q * inv**3)[:, None] * rel
-        E[near] = np.einsum("pa,pak->pk", rectangle_field(*args), panels.frames[jn]) * sigma[jn][:, None]
+        E[near] = G * sigma[jn][:, None]
     return V, E
 
 
@@ -369,7 +393,7 @@ class ConductorSolution:
         faces = []
         for k, plate in enumerate(self.solver.plates):
             mine = np.flatnonzero(self.panels.owner == k)
-            normal = self.panels.frames[mine[0], 2]
+            normal = self.panels.normals[mine[0]]
             inward = -normal if plate.center @ normal > 0 else normal
             across = EPS0 * self.field(self.panels.centers[mine]) @ inward
             half = self.sigma[mine] / 2
